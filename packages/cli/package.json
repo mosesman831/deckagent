@@ -1,0 +1,27 @@
+{
+  "name": "@deckagent/cli",
+  "version": "1.0.0",
+  "description": "DeckAgent CLI: one-command setup, deploy, device registration, daemon lifecycle",
+  "type": "module",
+  "bin": {
+    "deckagent": "./dist/index.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "test": "tsx --test test/*.test.ts",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "commander": "15.0.0",
+    "zod": "3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "20.14.0",
+    "tsx": "4.23.0",
+    "typescript": "5.6.3",
+    "wrangler": "4.107.0"
+  }
+}
