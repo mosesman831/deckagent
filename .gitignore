@@ -1,0 +1,21 @@
+The repo is scaffolded. Here's what's in it:
+
+```
+deckagent/
+├── SPEC.md             # Full architecture spec
+├── AGENTS.md            # Build instructions for Devin
+├── README.md            # Public-facing description
+├── packages/
+│   ├── cloudflare-worker/   # CF Worker (MCP endpoint + OAuth + tunnel)
+│   ├── desktop-daemon/      # System tray daemon
+│   ├── mcp-server/         # Shared MCP tool definitions
+│   └── cli/                # Installer CLI
+└── reference/
+    └── desktop-commander/   # Cloned for reference (MIT)
+```
+
+The first commit has the spec + structure. Let me push it.
+
+The full spec covers why it exists, architecture decisions (CF Worker vs relay, WebSocket tunnel, OAuth), detailed data flow, complete tool list (18 tools in v1, 8 tools in v2), security model (policy engine, device tokens, OAuth), build order (4 phases), and a direct Devin prompt to get started.
+
+Everything you need to hand this to Devin. Want me to push the commit, or do you want to review the spec first?
