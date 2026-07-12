@@ -4,7 +4,7 @@
   "compatibility_date": "2026-06-01",
   "compatibility_flags": ["nodejs_compat"],
   "kv_namespaces": [
-    { "binding": "DECK_KV", "id": "" }
+    { "binding": "DECK_KV", "id": "DECK_KV_NAMESPACE_ID_PLACEHOLDER" }
   ],
   "vars": {
     "GITHUB_CLIENT_ID": "",
