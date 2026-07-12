@@ -1,0 +1,30 @@
+{
+  "name": "@deckagent/desktop-daemon",
+  "version": "1.0.0",
+  "description": "DeckAgent desktop daemon: WebSocket tunnel client, policy engine, and tool executor",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "deckagent-daemon": "dist/index.js"
+  },
+  "scripts": {
+    "prebuild": "npm run build -w @deckagent/mcp-server",
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts --foreground",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@deckagent/mcp-server": "1.0.0",
+    "ws": "8.21.0",
+    "zod": "3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "20.14.0",
+    "@types/ws": "8.5.12",
+    "tsx": "4.23.0",
+    "typescript": "5.6.3"
+  }
+}
