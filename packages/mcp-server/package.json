@@ -1,0 +1,36 @@
+{
+  "name": "@deckagent/mcp-server",
+  "version": "1.0.0",
+  "description": "Pure MCP tool implementations for DeckAgent",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./schemas": {
+      "import": "./dist/schemas.js",
+      "types": "./dist/schemas.d.ts"
+    },
+    "./types": {
+      "import": "./dist/types.js",
+      "types": "./dist/types.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "test": "tsx --test test/**/*.test.ts"
+  },
+  "dependencies": {
+    "playwright-core": "1.61.1",
+    "zod": "3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "20.14.0",
+    "tsx": "4.23.0",
+    "typescript": "5.6.3"
+  }
+}
