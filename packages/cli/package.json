@@ -1,0 +1,23 @@
+{
+  "name": "@deckagent/cli",
+  "version": "1.0.0",
+  "description": "Command-line setup and lifecycle management for DeckAgent",
+  "type": "module",
+  "bin": {
+    "deckagent": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "commander": "15.0.0",
+    "zod": "3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "20.14.0",
+    "tsx": "4.23.0",
+    "typescript": "5.6.3",
+    "wrangler": "4.107.0"
+  }
+}
