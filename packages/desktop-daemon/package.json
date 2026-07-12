@@ -14,7 +14,8 @@
     "clean": "rm -rf dist",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts --foreground",
-    "test": "tsx --test test/*.test.ts"
+    "test": "tsx --test test/*.test.ts",
+    "lint": "tsc --noEmit"
   },
   "dependencies": {
     "@deckagent/mcp-server": "1.0.0",

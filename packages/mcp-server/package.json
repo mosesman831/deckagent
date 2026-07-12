@@ -22,7 +22,8 @@
   "scripts": {
     "build": "tsc",
     "clean": "rm -rf dist",
-    "test": "tsx --test test/*.test.ts"
+    "test": "tsx --test test/*.test.ts",
+    "lint": "tsc --noEmit"
   },
   "dependencies": {
     "playwright-core": "1.61.1",

@@ -22,11 +22,11 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "5.20260704.1",
+    "@cloudflare/workers-types": "4.20260702.1",
     "@types/node": "20.14.0",
     "react": "19.2.7",
     "tsx": "4.23.0",
     "typescript": "5.6.3",
-    "wrangler": "4.106.0"
+    "wrangler": "4.107.0"
   }
 }
