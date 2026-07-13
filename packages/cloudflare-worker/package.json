@@ -1,0 +1,23 @@
+{
+  "name": "@deckagent/cloudflare-worker",
+  "version": "0.1.0",
+  "description": "Cloudflare Worker MCP endpoint for DeckAgent",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "test": "node --loader ts-node/esm test.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241230.0",
+    "@types/node": "^20.17.10",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.2",
+    "wrangler": "^3.99.0"
+  }
+}
