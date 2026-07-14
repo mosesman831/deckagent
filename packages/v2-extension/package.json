@@ -1,0 +1,37 @@
+{
+  "name": "@deckagent/v2-extension",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "DeckAgent v2 Chrome extension — intercepts web AI chat API calls and routes them through the local daemon",
+  "scripts": {
+    "dev": "wxt",
+    "build": "wxt build",
+    "build:chrome": "wxt build -b chrome",
+    "zip": "wxt zip",
+    "zip:chrome": "wxt zip -b chrome",
+    "check": "tsc --noEmit",
+    "lint": "eslint . --ext .ts,.tsx",
+    "clean": "rm -rf .output dist node_modules/.cache"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.287",
+    "@types/chrome-remote-interface": "^0.34.0",
+    "@types/node": "^20.14.0",
+    "@typescript-eslint/eslint-plugin": "^7.13.0",
+    "@typescript-eslint/parser": "^7.13.0",
+    "chrome-remote-interface": "^0.34.0",
+    "eslint": "^8.57.0",
+    "happy-dom": "^20.10.6",
+    "puppeteer": "^23.11.1",
+    "tsx": "^4.23.1",
+    "typescript": "^5.4.5",
+    "wxt": "^0.18.15"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

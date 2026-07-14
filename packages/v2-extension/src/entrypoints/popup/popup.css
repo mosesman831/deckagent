@@ -1,0 +1,26 @@
+:root {
+  --deck-bg: #0f172a;
+  --deck-fg: #e2e8f0;
+  --deck-accent: #38bdf8;
+}
+
+body {
+  margin: 0;
+  width: 320px;
+  min-height: 200px;
+  background: var(--deck-bg);
+  color: var(--deck-fg);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  padding: 1rem;
+}
+
+h1 {
+  margin: 0 0 0.5rem;
+  font-size: 1.25rem;
+  color: var(--deck-accent);
+}
+
+p {
+  margin: 0 0 0.5rem;
+  line-height: 1.4;
+}

@@ -127,6 +127,75 @@ All config lives in `~/.deckagent/`:
     └── deckagent-YYYY-MM-DD.log
 ```
 
+## v2 Browser Extension 🧩
+
+> **⚠️ Experimental.** The v2 extension works with the 4 sites listed below but each AI's internal API can change without notice. Use at your own risk.
+
+DeckAgent v2 is a Chrome extension that lets **more AI web chats** use your daemon — not just ChatGPT/Claude. It intercepts fetch calls on:
+
+| Site | Adapter | Tested |
+|------|---------|--------|
+| [DeepSeek](https://chat.deepseek.com) | ✅ | 23 unit + E2E |
+| [Qwen](https://chat.qwenlm.ai) | ✅ | 48 unit + E2E |
+| [Kimi](https://kimi.com) | ✅ | 35 unit + E2E |
+| [Z.ai (GLM)](https://z.ai/chat) | ✅ | 44 unit + E2E |
+
+### How it works
+
+```
+AI Web Chat (DeepSeek/Qwen/Kimi/Z.ai)
+  │
+  ▼  fetch() intercepted by extension
+Content Script (monkey-patches window.fetch)
+  │
+  ├── adapter.transformRequest → injects tool system prompt
+  │
+  ▼  modified request sent to AI
+AI API responds
+  │
+  └── adapter.transformResponse → detects <<<TOOL>>> calls
+        │
+        ▼  sent to background WebSocket
+      DeckAgent Daemon  →  executes tool  →  result appended
+```
+
+### Install
+
+```bash
+# 1. Build the extension
+cd packages/v2-extension
+npm install
+npm run build
+
+# 2. Load in Chrome
+#    chrome://extensions → Enable Developer Mode → Load unpacked
+#    Select: packages/v2-extension/.output/chrome-mv3/
+
+# 3. Make sure your DeckAgent daemon is running
+```
+
+### Usage
+
+1. Start your DeckAgent daemon (v1 must be running on your machine)
+2. Open any supported AI chat (DeepSeek, Qwen, Kimi, or Z.ai)
+3. Paste the DeckAgent system prompt (below) into a new message
+4. Start asking the AI to use tools — watch it output `<<<TOOL>>>` blocks
+5. The extension intercepts, executes on your machine, and injects the result
+
+### System Prompt
+
+Paste this into your AI chat as the first message:
+
+> You have access to a local machine through DeckAgent. You can use these tools by outputting a JSON block with the format: `<<<TOOL>>>{"name":"tool_name","args":{...}}<<<END>>>`. Available tools: read_file, write_file, edit_file, search_files, list_directory, execute_command, get_environment, browser_navigate, browser_screenshot.
+
+### Disclaimer
+
+> **This extension intercepts network requests from supported AI chat sites.**
+> - It only reads requests to known API endpoints — no other traffic is touched.
+> - It does **not** collect or transmit any data to third parties.
+> - The AI chat sites may update their APIs at any time, potentially breaking the extension.
+> - Tested against 191 unit/integration/stress tests. Not tested against a full Chrome Web Store review.
+
 ## Development
 
 ```bash
@@ -137,9 +206,15 @@ npm run build
 cd packages/cloudflare-worker
 npx wrangler dev --port 8787
 # Then point your daemon at http://localhost:8787
+
+# v2 extension testing
+cd packages/v2-extension
+npm run build                    # builds to .output/chrome-mv3/
+npx tsx tests/deepseek.test.ts  # run adapter tests
+npx tsx tests/e2e-server.test.ts # run mock server E2E tests
 ```
 
-Four packages in an npm workspace:
+Five packages in an npm workspace:
 
 | Package | Description |
 |---------|-------------|
@@ -147,6 +222,7 @@ Four packages in an npm workspace:
 | `packages/cloudflare-worker` | Worker endpoint, DO tunnel, device API |
 | `packages/desktop-daemon` | WebSocket client, policy engine, tool executor |
 | `packages/cli` | `deckagent` setup wizard CLI |
+| `packages/v2-extension` | Chrome extension for DeepSeek/Qwen/Kimi/Z.ai |
 
 ## License
 
