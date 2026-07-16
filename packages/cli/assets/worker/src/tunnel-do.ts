@@ -33,6 +33,7 @@ import {
   WORKER_VERSION,
   checkProtocolVersion,
 } from "./protocol.js";
+import { isSoftToolErrorCode } from "./errors.js";
 
 // Allow time for local confirmation UX (~90s) plus tool execution headroom.
 const TOOL_TIMEOUT_MS = 180_000;
@@ -791,16 +792,7 @@ export class TunnelDO implements DurableObject {
             if (value.type === "tool_error") {
               // Policy / confirmation / validation failures should be normal
               // MCP tool results (isError) so playgrounds and LLMs can read them.
-              const softCodes = new Set([
-                "POLICY_BLOCKED",
-                "CONFIRMATION_REQUIRED",
-                "CONFIRMATION_DENIED",
-                "ACCESS_DENIED",
-                "COMMAND_BLOCKED",
-                "TOOL_NOT_FOUND",
-                "INVALID_ARGUMENTS",
-              ]);
-              if (softCodes.has(value.error.code)) {
+              if (isSoftToolErrorCode(value.error.code)) {
                 resolve(
                   jsonRpcResponse(id, {
                     content: [

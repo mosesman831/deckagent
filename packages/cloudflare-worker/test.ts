@@ -1,5 +1,8 @@
 import type { Env } from "./src/types.js";
-import worker from "./src/index.js";
+import worker, {
+  DEFAULT_DEVICE_API_RATE_LIMIT_PER_MINUTE,
+  DEFAULT_MCP_RATE_LIMIT_PER_MINUTE,
+} from "./src/index.js";
 import {
   getDevice,
   setDevice,
@@ -31,6 +34,7 @@ import {
   MIN_PROTOCOL_VERSION,
   WORKER_VERSION,
 } from "./src/protocol.js";
+import { SOFT_TOOL_ERROR_CODES } from "./src/errors.js";
 
 const API_TOKEN = "test-api-token-secret";
 const EXPECTED_TOOL_COUNT = 21;
@@ -181,7 +185,9 @@ class FakeDurableObjectNamespace {
   }
 }
 
-function makeEnv(): Env & { _kv: FakeKV; _do: FakeDurableObjectNamespace } {
+function makeEnv(
+  overrides: Partial<Env> = {}
+): Env & { _kv: FakeKV; _do: FakeDurableObjectNamespace } {
   const kv = new FakeKV();
   const tunnelDo = new FakeDurableObjectNamespace();
   return {
@@ -189,6 +195,7 @@ function makeEnv(): Env & { _kv: FakeKV; _do: FakeDurableObjectNamespace } {
     APP_NAME: "DeckAgent",
     API_TOKEN,
     TUNNEL_DO: tunnelDo as unknown as DurableObjectNamespace,
+    ...overrides,
     _kv: kv,
     _do: tunnelDo,
   };
@@ -206,6 +213,17 @@ function assert(condition: boolean, label: string): void {
     failed++;
   }
 }
+
+type TestToolErrorValue = {
+  type: "tool_error";
+  error: { code: string; message: string };
+};
+
+type TestTunnelInternals = {
+  ws: { send: (payload: string) => void };
+  deviceId: string;
+  pendingTools: Map<string, { resolve: (value: TestToolErrorValue) => void }>;
+};
 
 async function main() {
   console.log("=== DeckAgent Cloudflare Worker Smoke Test ===\n");
@@ -236,8 +254,8 @@ async function main() {
 
   // --- 2. Device register / auth ---
   console.log("\n2. Device registration & auth");
-  const deviceId = "test-device-1";
-  const deviceToken = "test-token-hex-deadbeef";
+  const deviceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const deviceToken = "test-token-hex-deadbeef-32-bytes";
 
   const regRes = await worker.fetch(
     new Request(url("/api/devices"), {
@@ -258,6 +276,36 @@ async function main() {
   assert(regRes.status === 200, `register → 200 (got ${regRes.status})`);
   const regBody = (await regRes.json()) as { ok?: boolean; device_id?: string };
   assert(regBody.ok === true && regBody.device_id === deviceId, "register body ok");
+
+  const invalidRegRes = await worker.fetch(
+    new Request(url("/api/devices"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${API_TOKEN}`,
+      },
+      body: JSON.stringify({
+        device_id: "not-a-uuid",
+        name: "",
+        token: "short",
+        capabilities: ["filesystem"],
+      }),
+    }),
+    env
+  );
+  const invalidRegBody = (await invalidRegRes.json()) as {
+    error?: string;
+    message?: string;
+  };
+  assert(
+    invalidRegRes.status === 400 && invalidRegBody.error === "INVALID_ARGUMENTS",
+    "invalid device register body → 400 INVALID_ARGUMENTS"
+  );
+  assert(
+    invalidRegBody.message?.includes("Invalid device registration") === true &&
+      invalidRegBody.message.includes("device_id"),
+    "invalid register message is human-readable"
+  );
 
   const device = await getDevice(env, deviceId);
   assert(device !== null, "device stored in KV");
@@ -542,8 +590,67 @@ async function main() {
     await updateDeviceStatus(env, deviceId, "offline");
   }
 
-  // --- 5b. MCP prompts + instructions ---
-  console.log("\n5b. MCP prompts / instructions");
+  // --- 5b. PR1.3 soft MCP tool errors ---
+  console.log("\n5b. PR1.3 soft MCP tool errors");
+  assert(
+    SOFT_TOOL_ERROR_CODES.includes("PATH_PROTECTED"),
+    "SOFT_TOOL_ERROR_CODES includes PATH_PROTECTED"
+  );
+  assert(
+    SOFT_TOOL_ERROR_CODES.includes("BUDGET_EXCEEDED"),
+    "SOFT_TOOL_ERROR_CODES includes BUDGET_EXCEEDED"
+  );
+  const softErrorDo = new TunnelDO({} as DurableObjectState, env);
+  const softInternals = softErrorDo as unknown as TestTunnelInternals;
+  softInternals.deviceId = deviceId;
+  softInternals.ws = {
+    send: (payload: string) => {
+      const sent = JSON.parse(payload) as { id?: string };
+      if (typeof sent.id !== "string") return;
+      queueMicrotask(() => {
+        softInternals.pendingTools.get(sent.id)?.resolve({
+          type: "tool_error",
+          error: {
+            code: "PATH_PROTECTED",
+            message: "Protected path access denied",
+          },
+        });
+      });
+    },
+  };
+  const softErrorRes = await softErrorDo.fetch(
+    new Request("https://tunnel-do/mcp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 93,
+        method: "tools/call",
+        params: {
+          name: "read_file",
+          arguments: { path: "/home/user/.ssh/id_rsa" },
+        },
+      }),
+    })
+  );
+  const softErrorBody = (await softErrorRes.json()) as {
+    result?: { isError?: boolean; content?: Array<{ text?: string }> };
+    error?: unknown;
+  };
+  assert(
+    softErrorRes.status === 200 &&
+      softErrorBody.error === undefined &&
+      softErrorBody.result?.isError === true,
+    "PATH_PROTECTED tool_error returns MCP isError result, not JSON-RPC 500"
+  );
+  assert(
+    softErrorBody.result?.content?.[0]?.text?.includes("[PATH_PROTECTED]") ===
+      true,
+    "PATH_PROTECTED is included in tool result text"
+  );
+
+  // --- 5c. MCP prompts + instructions ---
+  console.log("\n5c. MCP prompts / instructions");
   const initRes = await worker.fetch(
     new Request(url("/mcp"), {
       method: "POST",
@@ -680,8 +787,8 @@ async function main() {
     "resources/list matches RESOURCE_CATALOG"
   );
 
-  // --- 5c. MCP resources catalog + static reads ---
-  console.log("\n5c. MCP resources catalog / static reads");
+  // --- 5d. MCP resources catalog + static reads ---
+  console.log("\n5d. MCP resources catalog / static reads");
   assert(isKnownResourceUri("deckagent://about"), "about URI known");
   assert(isStaticResourceUri("deckagent://about"), "about is static");
   assert(isDaemonResourceUri("deckagent://policy"), "policy is daemon-backed");
@@ -764,8 +871,8 @@ async function main() {
     "listRegisteredDeviceIds includes test device"
   );
 
-  // --- 5d. F8 devices tool + sticky preferred device ---
-  console.log("\n5d. F8 devices tool + sticky preferred device");
+  // --- 5e. F8 devices tool + sticky preferred device ---
+  console.log("\n5e. F8 devices tool + sticky preferred device");
   const firstUuid = "11111111-1111-4111-8111-111111111111";
   const preferredUuid = "22222222-2222-4222-8222-222222222222";
   await setDevice(env, firstUuid, {
@@ -855,6 +962,31 @@ async function main() {
       preferBody.ok === true &&
       preferBody.preferred_device_id === preferredUuid,
     "PUT /api/devices/prefer stores sticky device"
+  );
+
+  const invalidPreferRes = await worker.fetch(
+    new Request(url("/api/devices/prefer"), {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${API_TOKEN}`,
+      },
+      body: JSON.stringify({ device_id: "not-a-uuid" }),
+    }),
+    env
+  );
+  const invalidPreferBody = (await invalidPreferRes.json()) as {
+    error?: string;
+    message?: string;
+  };
+  assert(
+    invalidPreferRes.status === 400 &&
+      invalidPreferBody.error === "INVALID_ARGUMENTS",
+    "invalid preferred device body → 400 INVALID_ARGUMENTS"
+  );
+  assert(
+    invalidPreferBody.message?.includes("Invalid preferred device") === true,
+    "invalid prefer message is human-readable"
   );
 
   const devicesPreferred = await readStaticResource("deckagent://devices", env);
@@ -1222,6 +1354,93 @@ async function main() {
     "non-SSE Accept keeps JSON Content-Type"
   );
   assert(jsonCallRes.status === 503, "non-SSE path hits Fake DO offline JSON");
+
+  // --- 12. PR1.4 Worker rate limiting ---
+  console.log("\n12. PR1.4 Worker rate limiting");
+  assert(
+    DEFAULT_MCP_RATE_LIMIT_PER_MINUTE === 120,
+    "default /mcp rate limit is 120/min"
+  );
+  assert(
+    DEFAULT_DEVICE_API_RATE_LIMIT_PER_MINUTE === 30,
+    "default /api/devices rate limit is 30/min"
+  );
+
+  const rateToken = "rate-limit-api-token-secret-32-bytes";
+  const rateEnv = makeEnv({
+    API_TOKEN: rateToken,
+    RATE_LIMIT_MCP_RPM: "2",
+    RATE_LIMIT_DEVICE_RPM: "2",
+  });
+  const authedHeaders = { authorization: `Bearer ${rateToken}` };
+  const rateMcp1 = await worker.fetch(
+    new Request(url("/mcp"), { method: "GET", headers: authedHeaders }),
+    rateEnv
+  );
+  const rateMcp2 = await worker.fetch(
+    new Request(url("/mcp"), { method: "GET", headers: authedHeaders }),
+    rateEnv
+  );
+  const rateMcp3 = await worker.fetch(
+    new Request(url("/mcp"), { method: "GET", headers: authedHeaders }),
+    rateEnv
+  );
+  const rateMcpBody = (await rateMcp3.json()) as {
+    code?: string;
+    message?: string;
+  };
+  assert(
+    rateMcp1.status === 200 && rateMcp2.status === 200,
+    "first two /mcp requests pass low test limit"
+  );
+  assert(
+    rateMcp3.status === 429 && rateMcpBody.code === "RATE_LIMITED",
+    "third /mcp request over low test limit → 429 RATE_LIMITED"
+  );
+  assert(
+    rateMcpBody.message?.includes("2 requests per minute") === true,
+    "rate limit response has human-readable message"
+  );
+
+  const deviceRateEnv = makeEnv({
+    API_TOKEN: `${rateToken}-devices`,
+    RATE_LIMIT_DEVICE_RPM: "2",
+  });
+  const deviceRateHeaders = {
+    authorization: `Bearer ${deviceRateEnv.API_TOKEN}`,
+  };
+  const rateDevices1 = await worker.fetch(
+    new Request(url("/api/devices"), {
+      method: "GET",
+      headers: deviceRateHeaders,
+    }),
+    deviceRateEnv
+  );
+  const rateDevices2 = await worker.fetch(
+    new Request(url("/api/devices"), {
+      method: "GET",
+      headers: deviceRateHeaders,
+    }),
+    deviceRateEnv
+  );
+  const rateDevices3 = await worker.fetch(
+    new Request(url("/api/devices"), {
+      method: "GET",
+      headers: deviceRateHeaders,
+    }),
+    deviceRateEnv
+  );
+  const rateDevicesBody = (await rateDevices3.json()) as {
+    code?: string;
+  };
+  assert(
+    rateDevices1.status === 200 && rateDevices2.status === 200,
+    "first two /api/devices requests pass low test limit"
+  );
+  assert(
+    rateDevices3.status === 429 && rateDevicesBody.code === "RATE_LIMITED",
+    "third /api/devices request over low test limit → 429 RATE_LIMITED"
+  );
 
   console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
   if (failed > 0) process.exit(1);

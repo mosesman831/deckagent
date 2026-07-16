@@ -3,6 +3,8 @@ export interface Env {
   APP_NAME: string;
   API_TOKEN: string;
   TUNNEL_DO: DurableObjectNamespace;
+  RATE_LIMIT_MCP_RPM?: string;
+  RATE_LIMIT_DEVICE_RPM?: string;
 }
 
 export interface DeviceInfo {

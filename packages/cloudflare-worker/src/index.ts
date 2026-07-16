@@ -1,4 +1,5 @@
 import type { Env } from "./types.js";
+import { z } from "zod";
 import { verifyApiToken } from "./auth.js";
 import {
   getDevice,
@@ -15,7 +16,30 @@ import { handleMcpRequest } from "./mcp-handler.js";
 
 export { TunnelDO } from "./tunnel-do.js";
 
+export const RATE_LIMIT_WINDOW_MS = 60_000;
+export const DEFAULT_MCP_RATE_LIMIT_PER_MINUTE = 120;
+export const DEFAULT_DEVICE_API_RATE_LIMIT_PER_MINUTE = 30;
+
 const startTime = Date.now();
+
+const DeviceRegisterSchema = z
+  .object({
+    device_id: z.string().uuid(),
+    token: z.string().min(32),
+    name: z.string().trim().min(1).max(128).optional(),
+    capabilities: z.array(z.string().trim().min(1).max(128)).max(64).default([]),
+  })
+  .strict();
+
+const DevicePreferSchema = z
+  .object({
+    device_id: z.string().uuid(),
+  })
+  .strict();
+
+type RateLimitScope = "mcp" | "devices";
+
+const rateLimitWindows = new Map<string, number[]>();
 
 /**
  * CORS for /mcp and API: never use `*` when Authorization is used.
@@ -59,11 +83,87 @@ function errorResponse(
   });
 }
 
+function rateLimitedResponse(message: string, cors: Record<string, string>): Response {
+  return new Response(JSON.stringify({ code: "RATE_LIMITED", message }), {
+    status: 429,
+    headers: { "Content-Type": "application/json", ...cors },
+  });
+}
+
+function formatZodError(prefix: string, error: z.ZodError): string {
+  const details = error.issues
+    .map((issue) => {
+      const field = issue.path.length > 0 ? issue.path.join(".") : "body";
+      return `${field}: ${issue.message}`;
+    })
+    .join("; ");
+  return `${prefix}: ${details}`;
+}
+
+function parsePositiveInteger(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function rateLimitForScope(env: Env, scope: RateLimitScope): number {
+  if (scope === "mcp") {
+    return parsePositiveInteger(
+      env.RATE_LIMIT_MCP_RPM,
+      DEFAULT_MCP_RATE_LIMIT_PER_MINUTE
+    );
+  }
+  return parsePositiveInteger(
+    env.RATE_LIMIT_DEVICE_RPM,
+    DEFAULT_DEVICE_API_RATE_LIMIT_PER_MINUTE
+  );
+}
+
+function checkRateLimit(
+  tokenHash: string,
+  scope: RateLimitScope,
+  limit: number,
+  now = Date.now()
+): { ok: true } | { ok: false; retryAfterSeconds: number } {
+  const key = `${scope}:${tokenHash}`;
+  const windowStart = now - RATE_LIMIT_WINDOW_MS;
+  const timestamps = (rateLimitWindows.get(key) ?? []).filter(
+    (timestamp) => timestamp > windowStart
+  );
+
+  if (timestamps.length >= limit) {
+    const oldest = timestamps[0] ?? now;
+    const retryAfterMs = Math.max(1, RATE_LIMIT_WINDOW_MS - (now - oldest));
+    rateLimitWindows.set(key, timestamps);
+    return { ok: false, retryAfterSeconds: Math.ceil(retryAfterMs / 1000) };
+  }
+
+  timestamps.push(now);
+  rateLimitWindows.set(key, timestamps);
+  return { ok: true };
+}
+
+function enforceRateLimit(
+  tokenHash: string,
+  scope: RateLimitScope,
+  env: Env,
+  cors: Record<string, string>
+): Response | null {
+  const limit = rateLimitForScope(env, scope);
+  const result = checkRateLimit(tokenHash, scope, limit);
+  if (result.ok) return null;
+  const route = scope === "mcp" ? "/mcp" : "/api/devices";
+  return rateLimitedResponse(
+    `Rate limit exceeded for ${route}: ${limit} requests per minute. Try again in ${result.retryAfterSeconds} seconds.`,
+    cors
+  );
+}
+
 async function requireApiToken(
   request: Request,
   env: Env,
   cors: Record<string, string>
-): Promise<Response | true> {
+): Promise<Response | { tokenHash: string }> {
   const auth = request.headers.get("Authorization");
   if (!auth || !auth.startsWith("Bearer ")) {
     return errorResponse(
@@ -83,7 +183,7 @@ async function requireApiToken(
       cors
     );
   }
-  return true;
+  return { tokenHash: await hashToken(token) };
 }
 
 export default {
@@ -125,13 +225,17 @@ export default {
 
       if (url.pathname === "/mcp") {
         const auth = await requireApiToken(request, env, cors);
-        if (auth !== true) return auth;
+        if (auth instanceof Response) return auth;
+        const limited = enforceRateLimit(auth.tokenHash, "mcp", env, cors);
+        if (limited) return limited;
         return handleMcpRequest(request, env, cors);
       }
 
       if (url.pathname.startsWith("/api/devices")) {
         const auth = await requireApiToken(request, env, cors);
-        if (auth !== true) return auth;
+        if (auth instanceof Response) return auth;
+        const limited = enforceRateLimit(auth.tokenHash, "devices", env, cors);
+        if (limited) return limited;
 
         if (url.pathname === "/api/devices" && request.method === "GET") {
           return jsonResponse(
@@ -145,14 +249,9 @@ export default {
         }
 
         if (url.pathname === "/api/devices" && request.method === "POST") {
-          let body: {
-            device_id?: string;
-            name?: string;
-            token?: string;
-            capabilities?: string[];
-          };
+          let rawBody: unknown;
           try {
-            body = await request.json();
+            rawBody = await request.json();
           } catch {
             return errorResponse(
               400,
@@ -161,20 +260,22 @@ export default {
               cors
             );
           }
-          if (!body.device_id || !body.token) {
+          const parsed = DeviceRegisterSchema.safeParse(rawBody);
+          if (!parsed.success) {
             return errorResponse(
               400,
               "INVALID_ARGUMENTS",
-              "Missing device_id or token",
+              formatZodError("Invalid device registration", parsed.error),
               cors
             );
           }
+          const body = parsed.data;
           await setDevice(env, body.device_id, {
             id: body.device_id,
             name: body.name ?? body.device_id,
             status: "offline",
             token_hash: await hashToken(body.token),
-            capabilities: body.capabilities ?? [],
+            capabilities: body.capabilities,
             last_seen: Date.now(),
           });
           return jsonResponse({ ok: true, device_id: body.device_id }, 200, cors);
@@ -182,9 +283,9 @@ export default {
 
         if (url.pathname === "/api/devices/prefer") {
           if (request.method === "PUT") {
-            let body: { device_id?: unknown };
+            let rawBody: unknown;
             try {
-              body = (await request.json()) as { device_id?: unknown };
+              rawBody = await request.json();
             } catch {
               return errorResponse(
                 400,
@@ -194,16 +295,16 @@ export default {
               );
             }
 
-            const preferredDeviceId =
-              typeof body.device_id === "string" ? body.device_id.trim() : "";
-            if (!preferredDeviceId) {
+            const parsed = DevicePreferSchema.safeParse(rawBody);
+            if (!parsed.success) {
               return errorResponse(
                 400,
                 "INVALID_ARGUMENTS",
-                "Missing device_id",
+                formatZodError("Invalid preferred device", parsed.error),
                 cors
               );
             }
+            const preferredDeviceId = parsed.data.device_id;
 
             await setPreferredDeviceId(env, preferredDeviceId);
             return jsonResponse(
