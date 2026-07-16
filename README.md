@@ -19,7 +19,7 @@ npx @deckagent/cli setup     # one-command setup wizard
 npm install -g @deckagent/cli
 ```
 
-Then add the printed Worker URL as a custom MCP connector in ChatGPT, Claude, or Gemini.
+Then add the printed Worker URL as a custom MCP connector in ChatGPT, Claude, or Gemini using Bearer token authentication.
 
 ### Manual Setup
 
@@ -48,6 +48,7 @@ cat > ~/.deckagent/config.json << 'EOF'
   "device_id": "<uuid>",
   "token": "<device-token>",
   "worker_url": "https://your-worker.workers.dev",
+  "api_token": "<same API_TOKEN used for the Worker secret>",
   "device_name": "My Machine",
   "heartbeat_interval": 15,
   "log_level": "info"
@@ -58,20 +59,38 @@ EOF
 npx @deckagent/cli daemon --foreground
 ```
 
-## Features
+## Status
 
-- **Self-hosted** — your Worker, your Cloudflare account, your data
+### Implemented
+
+- **Self-hosted bridge** — your Worker, your Cloudflare account, your data
 - **No relay** — direct WebSocket tunnel via Cloudflare Durable Objects
-- **20 tools** across filesystem, terminal, browser, environment, and snapshots
+- **20 built-in tools** across filesystem, terminal, browser, environment, and snapshots
 - **Workspaces** — project-scoped relative paths (`deckagent workspace use`)
 - **MCP resources** — policy, audit, workspace, devices via `resources/read`
 - **Snapshots / undo** — automatic backups before edits; `restore_snapshot`
 - **Secrets vault** — inject tokens into commands without model-visible values
 - **Budgets** — hourly caps on tool calls, shell time, and bytes written
-- **Local control UI** — `http://127.0.0.1:9150` (`deckagent ui`)
+- **Local control UI** — token-protected loopback UI opened by `deckagent ui`
 - **SSE streaming** — `execute_command_stream` with `Accept: text/event-stream`
-- **Policy engine** — allow/block directories, allowlist/blocklist commands, read-only, confirmation
-- **Cross-platform** — macOS & Linux (LaunchAgent/systemd); Windows via scheduled task at logon
+- **Release workflow** — tag builds pack public packages and publish when `NPM_TOKEN` is configured
+- **Policy engine** — trusted/denied/protected paths, allowlist/blocklist commands, read-only, confirmation, profiles
+- **Packaged CLI** — install with `npm install -g @deckagent/cli` or run `npx @deckagent/cli setup`
+- **Cross-platform daemon install** — macOS LaunchAgent, Linux systemd user service, Windows scheduled task at logon
+
+### Experimental / high-trust
+
+- **Custom plugins** are supported, but plugins execute local code. Enable them only for plugin authors and plugin code you trust.
+- **v2 browser extension** works with the listed AI sites, but those sites can change internal APIs without notice and the extension has not gone through Chrome Web Store review.
+- **`terminal_mode=sandbox_fs`** requires an OS sandbox binary. On Linux, install `bwrap`; without it, sandbox mode fails closed.
+
+### Planned / not shipped
+
+- Local and Worker metrics endpoints/counters from PR2.2
+- Best-effort abort signals for long-running tools from PR2.5
+- ChatGPT OAuth app flow; DeckAgent currently uses Bearer tokens only
+- Chrome Web Store publication for the experimental v2 extension
+- Multi-tenant SaaS, team billing, or hosted relay mode
 
 ## How It Works
 
@@ -105,7 +124,8 @@ Custom plugins can add tools when the daemon is online. Drop a plugin at
 `~/.deckagent/plugins/<name>/plugin.json` with an `entry` module exporting
 `run(args)`, enable the dev profile or `allow_plugins=true`, then restart the
 daemon. Use `deckagent plugin list` to inspect discovered plugins; plugin tools
-are not included in the Worker's offline static catalog.
+are not included in the Worker's offline static catalog. Plugins are a local-code
+trust boundary: use them only when you trust the plugin source.
 
 ## Security
 
@@ -119,7 +139,10 @@ are not included in the Worker's offline static catalog.
   - `require_confirmation` — blocks until you approve in a local browser page (`http://127.0.0.1:9148/confirm/...`); remote `_preconfirmed` is ignored
   - `allow_browser` / `allow_terminal` — feature gates
   - `max_file_read_size` — caps file reads
-- The Cloudflare Worker uses Bearer token auth — treat `API_TOKEN` and device tokens as secrets
+- The Cloudflare Worker uses Bearer token auth only (no OAuth flow) — treat `API_TOKEN` and device tokens as secrets
+- Rotate the Worker Bearer token with `deckagent token rotate`; pass `--deploy` to update the Worker secret through Wrangler when available
+- The local control UI uses a token stored at `~/.deckagent/ui.token`; open it with `deckagent ui` so the tokenized loopback URL/cookie is set
+- `terminal_mode=sandbox_fs` needs `bwrap` on Linux; without a supported sandbox binary, commands are denied rather than run unsandboxed
 - See [SECURITY.md](SECURITY.md) for reporting and operator hardening
 
 ## Comparison
@@ -142,6 +165,7 @@ All config lives in `~/.deckagent/`:
 ~/.deckagent/
 ├── config.json      # device_id, token, worker_url, workspace, preferences
 ├── policy.json      # allowed dirs, blocked commands, confirmations, budgets
+├── ui.token         # local control UI token, generated by the daemon
 ├── plugins/         # optional custom tool plugins
 └── logs/
     ├── deckagent-YYYY-MM-DD.log
@@ -157,6 +181,18 @@ deckagent workspace clear
 ```
 
 Agents see `workspace_root` / `workspace_name` from `get_environment`, and can read `deckagent://workspace` via MCP resources.
+
+### Token rotation
+
+DeckAgent uses one Worker Bearer token (`api_token` in `~/.deckagent/config.json`, `API_TOKEN` in Cloudflare Workers secrets). There is no OAuth connector flow today.
+
+```bash
+deckagent token rotate
+# Then update the Worker secret with the printed Wrangler command and update each MCP connector's Bearer token.
+
+deckagent token rotate --deploy
+# Same local rotation, plus `wrangler secret put API_TOKEN` when Wrangler is available.
+```
 
 ## v2 Browser Extension 🧩
 

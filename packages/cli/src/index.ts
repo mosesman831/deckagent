@@ -22,6 +22,7 @@ import { runDeviceCommand } from './device-cmd.js';
 import { openControlUi } from './ui.js';
 import { runPluginCommand } from './plugin.js';
 import { runUninstall } from './uninstall.js';
+import { runTokenCommand } from './token.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -48,6 +49,7 @@ Usage:
   deckagent device list        List registered devices from the Worker
   deckagent device prefer <id> Set sticky preferred device
   deckagent device clear       Clear sticky preferred device
+  deckagent token rotate [--deploy]  Rotate the Worker Bearer API token
   deckagent workspace use <path>  Set active workspace (project scope)
   deckagent workspace status   Show current workspace
   deckagent workspace clear    Clear workspace from config
@@ -178,6 +180,11 @@ async function main(): Promise<void> {
 
     case 'device': {
       await runDeviceCommand(args.slice(1));
+      break;
+    }
+
+    case 'token': {
+      await runTokenCommand(args.slice(1));
       break;
     }
 

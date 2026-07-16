@@ -1,6 +1,6 @@
 # DeckAgent — Production Readiness Spec (P0–P2)
 
-> Status: **SPEC → IMPLEMENT**  
+> Status: **P0/P1 implemented; P2 partial** (`PR2.1`, `PR2.3`, and `PR2.4` implemented; `PR2.2` and `PR2.5` remain pending)
 > Goal: Close remaining gaps so DeckAgent is honestly “production-ready” for self-hosted operators.  
 > Assumes Waves 2–4 and F1–F10 are already on branch.
 
@@ -294,6 +294,8 @@ All **P0 / P1 / P2** items from the production audit. Fully implement (not stub)
 
 ### PR2.1 — Docs sync
 
+**Status:** Implemented.
+
 **Design:**
 1. Create `/workspace/SPEC.md` as canonical index linking protocols + security + wave specs + this doc.
 2. README: Implemented vs Experimental vs Planned; fix `npx @deckagent/cli`.
@@ -302,6 +304,8 @@ All **P0 / P1 / P2** items from the production audit. Fully implement (not stub)
 ---
 
 ### PR2.2 — Metrics
+
+**Status:** Pending.
 
 **Design:**
 1. Daemon `~/.deckagent/metrics.json` updated periodically: counters for tool_ok, tool_denied_by_code, confirmations, reconnects.
@@ -312,6 +316,8 @@ All **P0 / P1 / P2** items from the production audit. Fully implement (not stub)
 
 ### PR2.3 — Release workflow
 
+**Status:** Implemented.
+
 **Design:**
 1. `CHANGELOG.md` Keep-a-Changelog format with Unreleased + 0.2.0 notes.
 2. `.github/workflows/release.yml` on tag `v*` → pack + upload artifacts (npm publish only if `NPM_TOKEN` secret present; otherwise artifacts only).
@@ -320,6 +326,8 @@ All **P0 / P1 / P2** items from the production audit. Fully implement (not stub)
 
 ### PR2.4 — Token rotation guide
 
+**Status:** Implemented.
+
 **Design:**
 1. Docs section + CLI `deckagent token rotate` that regenerates `api_token` in config, prints wrangler secret set instructions, updates local config.
 2. Does not auto-deploy unless `--deploy`.
@@ -327,6 +335,8 @@ All **P0 / P1 / P2** items from the production audit. Fully implement (not stub)
 ---
 
 ### PR2.5 — Abort signal (best-effort)
+
+**Status:** Pending.
 
 **Design:**
 1. Pass `AbortSignal` into terminal execute and browser navigate; kill child / page on abort.
@@ -370,23 +380,25 @@ All **P0 / P1 / P2** items from the production audit. Fully implement (not stub)
 
 ## 5. Acceptance checklist
 
-- [ ] `sandbox_fs` never uses bare shell spawn
-- [ ] restore path policy enforced
-- [ ] missing policy → strict
-- [ ] pack-smoke green
-- [ ] GET confirm approve → 405; UI mutations need token
-- [ ] plugins run in child process
-- [ ] browser route host deny works
-- [ ] PATH_PROTECTED is soft MCP error
-- [ ] rate limit returns 429
-- [ ] auth_ok warning in health + doctor
-- [ ] uninstall --dry-run safe
-- [ ] logs/audit keep ≤5 rotated @10MB
-- [ ] device API Zod validated
-- [ ] CI uses ci + pack smoke
-- [ ] SPEC.md + README + SECURITY + CHANGELOG accurate
+- [x] `sandbox_fs` never uses bare shell spawn
+- [x] restore path policy enforced
+- [x] missing policy → strict
+- [x] pack-smoke green
+- [x] GET confirm approve → 405; UI mutations need token
+- [x] plugins run in child process
+- [x] browser route host deny works
+- [x] PATH_PROTECTED is soft MCP error
+- [x] rate limit returns 429
+- [x] auth_ok warning in health + doctor
+- [x] uninstall --dry-run safe
+- [x] logs/audit keep ≤5 rotated @10MB
+- [x] device API Zod validated
+- [x] CI uses ci + pack smoke
+- [x] SPEC.md + README + SECURITY + CHANGELOG accurate
+- [x] token rotation CLI + Bearer-only operator guide
 - [ ] metrics endpoint/file exists
-- [ ] release workflow present
+- [x] release workflow present
+- [ ] abort signal for long tools exists
 
 ---
 

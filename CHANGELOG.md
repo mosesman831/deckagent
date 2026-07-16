@@ -7,7 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Added
+
+- `deckagent token rotate [--deploy]` for Worker Bearer token rotation.
+- Canonical `SPEC.md` index and refreshed operator security/readiness docs.
 
 ## [0.2.0] - 2026-07-16
 
@@ -18,7 +21,7 @@ _No unreleased changes yet._
 - Wave 4 hard security enforcement: strict/dev/locked profiles, capability-based tool filtering, trusted/denied/protected path policy, read-only hard gates, path canonicalization, terminal containment modes, browser/network egress controls, policy lock, and sensitive path defaults.
 - Production readiness P0 hardening: real `sandbox_fs` wrapping, restore target policy re-checks, fail-closed strict defaults, publishable public packages, and loopback CSRF/UI token protections.
 - Production readiness P1 hardening: plugin child-process isolation, browser host enforcement, soft MCP policy errors, Worker rate limiting, daemon protocol compatibility handling, safer uninstall flows, 10MB x 5 log/audit rotation, Zod validation on device APIs, CI pack smoke checks, and strict allowlist documentation.
-- Production readiness P2 operator improvements: canonical docs sync, lightweight metrics, release workflow and changelog, token rotation guidance, and best-effort abort handling for long-running tools.
+- Production readiness P2 release workflow and changelog groundwork. Metrics, token rotation CLI, and best-effort abort handling remain outside the 0.2.0 release notes.
 
 ### Changed
 
