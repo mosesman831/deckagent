@@ -22,6 +22,7 @@ export const ConfigSchema = z.object({
   tool_timeout: z.number().int().min(1).max(300).default(60),
   auto_connect: z.boolean().default(true),
   log_level: z.enum(["info", "debug", "error", "warn"]).default("info"),
+  preferred_device_id: z.string().uuid().optional(),
   workspace: WorkspaceSchema.optional(),
 });
 

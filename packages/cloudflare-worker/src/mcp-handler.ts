@@ -1,6 +1,7 @@
 import type { Env } from "./types.js";
+import { z } from "zod";
 import { JsonRpcCode } from "./types.js";
-import { TOOL_CATALOG, TOOL_NAMES } from "./tool-catalog.js";
+import { TOOL_CATALOG } from "./tool-catalog.js";
 import {
   MCP_INSTRUCTIONS,
   PROMPT_CATALOG,
@@ -14,7 +15,7 @@ import {
   isStaticResourceUri,
   readStaticResource,
 } from "./resource-catalog.js";
-import { resolveTargetDeviceId } from "./device-registry.js";
+import { listDevices, resolveTargetDeviceId } from "./device-registry.js";
 import {
   MIN_PROTOCOL_VERSION,
   WORKER_VERSION,
@@ -25,6 +26,8 @@ export { PROMPT_CATALOG, MCP_INSTRUCTIONS } from "./prompt-catalog.js";
 export { RESOURCE_CATALOG } from "./resource-catalog.js";
 
 type JsonRpcId = string | number | null;
+
+const LIST_DEVICES_ARGS_SCHEMA = z.object({}).strict();
 
 function jsonRpcResponse(id: JsonRpcId, result: unknown, cors: HeadersInit): Response {
   return new Response(JSON.stringify({ jsonrpc: "2.0", id, result }), {
@@ -107,9 +110,14 @@ async function resolveToolsList(
   env: Env,
   cors: Record<string, string>,
   id: JsonRpcId,
-  requestedDeviceId?: string
+  requestedDeviceId?: string,
+  headerDeviceId?: string | null
 ): Promise<Response> {
-  const resolved = await resolveTargetDeviceId(env, requestedDeviceId);
+  const resolved = await resolveTargetDeviceId(
+    env,
+    requestedDeviceId,
+    headerDeviceId
+  );
   if ("error" in resolved) {
     if (resolved.error === "DEVICE_OFFLINE") {
       return jsonRpcResponse(id, { tools: TOOL_CATALOG }, cors);
@@ -167,7 +175,13 @@ export async function handleMcpRequest(
   cors: Record<string, string>
 ): Promise<Response> {
   if (request.method === "GET") {
-    return resolveToolsList(env, cors, "0");
+    return resolveToolsList(
+      env,
+      cors,
+      "0",
+      undefined,
+      request.headers.get("X-DeckAgent-Device-Id")
+    );
   }
 
   if (request.method !== "POST") {
@@ -230,7 +244,13 @@ export async function handleMcpRequest(
   }
 
   if (method === "tools/list") {
-    return resolveToolsList(env, cors, id, body.params?.deviceId);
+    return resolveToolsList(
+      env,
+      cors,
+      id,
+      body.params?.deviceId,
+      request.headers.get("X-DeckAgent-Device-Id")
+    );
   }
 
   if (method === "prompts/list") {
@@ -300,7 +320,11 @@ export async function handleMcpRequest(
 
     if (isDaemonResourceUri(uri)) {
       const requestedDeviceId = body.params?.deviceId;
-      const resolved = await resolveTargetDeviceId(env, requestedDeviceId);
+      const resolved = await resolveTargetDeviceId(
+        env,
+        requestedDeviceId,
+        request.headers.get("X-DeckAgent-Device-Id")
+      );
       if ("error" in resolved) {
         return jsonRpcError(id, resolved.error, resolved.message, {
           rpcCode: deckCodeToRpc(resolved.error),
@@ -352,7 +376,7 @@ export async function handleMcpRequest(
     const toolArgs = body.params?.arguments ?? {};
     const requestedDeviceId = body.params?.deviceId;
 
-    if (!toolName || !TOOL_NAMES.has(toolName)) {
+    if (!toolName) {
       return jsonRpcError(
         id,
         "TOOL_NOT_FOUND",
@@ -365,7 +389,28 @@ export async function handleMcpRequest(
       );
     }
 
-    const resolved = await resolveTargetDeviceId(env, requestedDeviceId);
+    if (toolName === "list_devices") {
+      const parsed = LIST_DEVICES_ARGS_SCHEMA.safeParse(toolArgs);
+      if (!parsed.success) {
+        return jsonRpcError(
+          id,
+          "INVALID_ARGUMENTS",
+          "list_devices accepts an empty arguments object",
+          {
+            rpcCode: JsonRpcCode.INVALID_PARAMS,
+            httpStatus: 400,
+            cors,
+          }
+        );
+      }
+      return jsonRpcResponse(id, { devices: await listDevices(env) }, cors);
+    }
+
+    const resolved = await resolveTargetDeviceId(
+      env,
+      requestedDeviceId,
+      request.headers.get("X-DeckAgent-Device-Id")
+    );
     if ("error" in resolved) {
       return jsonRpcError(id, resolved.error, resolved.message, {
         rpcCode: deckCodeToRpc(resolved.error),

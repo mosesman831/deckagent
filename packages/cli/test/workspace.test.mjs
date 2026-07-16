@@ -113,6 +113,7 @@ function testConfigSchemaPreservesWorkspace() {
     worker_url: 'https://example.workers.dev',
     device_name: 'test-host',
     api_token: 'b'.repeat(32),
+    preferred_device_id: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
     workspace: {
       root: '/tmp/project',
       name: 'project',
@@ -122,6 +123,7 @@ function testConfigSchemaPreservesWorkspace() {
 
   const parsed = ConfigSchema.parse(raw);
   assert.ok(parsed.workspace);
+  assert.equal(parsed.preferred_device_id, 'ffffffff-ffff-4fff-8fff-ffffffffffff');
   assert.equal(parsed.workspace.root, '/tmp/project');
   assert.equal(parsed.workspace.name, 'project');
   assert.equal(parsed.workspace.allow_outside_with_confirmation, true);

@@ -6,6 +6,10 @@ import {
   removeDevice,
   updateDeviceStatus,
   hashToken,
+  clearPreferredDeviceId,
+  getPreferredDeviceId,
+  listDevices,
+  setPreferredDeviceId,
 } from "./device-registry.js";
 import { handleMcpRequest } from "./mcp-handler.js";
 
@@ -20,9 +24,9 @@ const startTime = Date.now();
 function corsHeaders(request: Request): Record<string, string> {
   const origin = request.headers.get("Origin");
   const headers: Record<string, string> = {
-    "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
     "Access-Control-Allow-Headers":
-      "Content-Type, Authorization, Accept, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID",
+      "Content-Type, Authorization, Accept, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID, X-DeckAgent-Device-Id",
     "Access-Control-Max-Age": "86400",
   };
   if (origin) {
@@ -129,6 +133,17 @@ export default {
         const auth = await requireApiToken(request, env, cors);
         if (auth !== true) return auth;
 
+        if (url.pathname === "/api/devices" && request.method === "GET") {
+          return jsonResponse(
+            {
+              preferred_device_id: await getPreferredDeviceId(env),
+              devices: await listDevices(env),
+            },
+            200,
+            cors
+          );
+        }
+
         if (url.pathname === "/api/devices" && request.method === "POST") {
           let body: {
             device_id?: string;
@@ -163,6 +178,56 @@ export default {
             last_seen: Date.now(),
           });
           return jsonResponse({ ok: true, device_id: body.device_id }, 200, cors);
+        }
+
+        if (url.pathname === "/api/devices/prefer") {
+          if (request.method === "PUT") {
+            let body: { device_id?: unknown };
+            try {
+              body = (await request.json()) as { device_id?: unknown };
+            } catch {
+              return errorResponse(
+                400,
+                "INVALID_ARGUMENTS",
+                "Invalid JSON body",
+                cors
+              );
+            }
+
+            const preferredDeviceId =
+              typeof body.device_id === "string" ? body.device_id.trim() : "";
+            if (!preferredDeviceId) {
+              return errorResponse(
+                400,
+                "INVALID_ARGUMENTS",
+                "Missing device_id",
+                cors
+              );
+            }
+
+            await setPreferredDeviceId(env, preferredDeviceId);
+            return jsonResponse(
+              { ok: true, preferred_device_id: preferredDeviceId },
+              200,
+              cors
+            );
+          }
+
+          if (request.method === "DELETE") {
+            await clearPreferredDeviceId(env);
+            return jsonResponse(
+              { ok: true, preferred_device_id: null },
+              200,
+              cors
+            );
+          }
+
+          return errorResponse(
+            405,
+            "METHOD_NOT_ALLOWED",
+            "Method not allowed",
+            cors
+          );
         }
 
         const deviceId = url.pathname.slice("/api/devices/".length);

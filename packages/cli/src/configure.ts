@@ -20,6 +20,7 @@ export const ConfigSchema = z.object({
   tool_timeout: z.number().int().default(60),
   auto_connect: z.boolean().default(true),
   log_level: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+  preferred_device_id: z.string().uuid().optional(),
   // Optional project scope (Wave 3 F1). Must be preserved on read/write.
   workspace: WorkspaceSchema.optional()
 });

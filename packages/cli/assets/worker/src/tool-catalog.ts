@@ -1,6 +1,6 @@
 /**
  * Single source of truth for the MCP tool catalog exposed by the Worker.
- * Must stay in sync with @deckagent/mcp-server tools (20 tools).
+ * Must stay in sync with @deckagent/mcp-server tools plus Worker-local tools.
  */
 
 export interface McpToolDefinition {
@@ -10,6 +10,12 @@ export interface McpToolDefinition {
 }
 
 export const TOOL_CATALOG: McpToolDefinition[] = [
+  {
+    name: "list_devices",
+    description:
+      "List registered DeckAgent devices and their online/offline status. Worker-local; does not require a desktop daemon round-trip.",
+    inputSchema: { type: "object", properties: {} },
+  },
   {
     name: "read_file",
     description:
@@ -263,6 +269,7 @@ export const TOOL_CATALOG: McpToolDefinition[] = [
 ];
 
 export const TOOL_NAMES = new Set(TOOL_CATALOG.map((t) => t.name));
+export const WORKER_LOCAL_TOOL_NAMES = new Set(["list_devices"]);
 
 export function getToolByName(name: string): McpToolDefinition | undefined {
   return TOOL_CATALOG.find((t) => t.name === name);
@@ -282,5 +289,7 @@ export function filterToolCatalog(
     enabledTools instanceof Set
       ? enabledTools
       : new Set(enabledTools);
-  return TOOL_CATALOG.filter((t) => set.has(t.name));
+  return TOOL_CATALOG.filter(
+    (t) => set.has(t.name) || WORKER_LOCAL_TOOL_NAMES.has(t.name)
+  );
 }

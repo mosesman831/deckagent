@@ -183,6 +183,35 @@ async function runProfile(
 
   // 4. prompts/list + prompts/get deckagent_system
   {
+    const step = "tools/call list_devices";
+    try {
+      const { status, json } = await mcpCall(url, token, {
+        id: id++,
+        method: "tools/call",
+        params: { name: "list_devices", arguments: {} },
+      });
+      const devices = (json.result as { devices?: unknown[] } | undefined)
+        ?.devices;
+      const ok =
+        status === 200 &&
+        hasResult(json) &&
+        Array.isArray(devices);
+      results.push({
+        step,
+        ok,
+        detail: ok ? `${devices!.length} device(s)` : `status=${status}`,
+      });
+    } catch (err) {
+      results.push({
+        step,
+        ok: false,
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // 5. prompts/list + prompts/get deckagent_system
+  {
     const step = "prompts/list";
     try {
       const { status, json } = await mcpCall(url, token, {

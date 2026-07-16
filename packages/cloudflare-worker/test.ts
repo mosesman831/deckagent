@@ -33,6 +33,7 @@ import {
 } from "./src/protocol.js";
 
 const API_TOKEN = "test-api-token-secret";
+const EXPECTED_TOOL_COUNT = 21;
 
 // Minimal in-memory KV for local message-flow testing.
 class FakeKV {
@@ -101,6 +102,8 @@ class FakeKV {
 class FakeDurableObjectNamespace {
   /** Last Accept header seen on a stub.fetch (for SSE forwarding tests). */
   lastAccept: string | null = null;
+  /** Last device Durable Object selected by mcp-handler routing. */
+  lastRoutedDeviceId: string | null = null;
   /**
    * S2: simulated daemon policy_caps. `null` = full catalog (pre-caps).
    */
@@ -109,11 +112,12 @@ class FakeDurableObjectNamespace {
   idFromName(name: string): { name: string } {
     return { name };
   }
-  get(_id: { name: string }): {
+  get(id: { name: string }): {
     fetch: (request: Request) => Promise<Response>;
   } {
     return {
       fetch: async (request: Request) => {
+        this.lastRoutedDeviceId = id.name;
         this.lastAccept = request.headers.get("Accept");
         let body: {
           method?: string;
@@ -292,7 +296,11 @@ async function main() {
 
   // --- 4. Tool catalog ---
   console.log("\n4. Tool catalog (single source)");
-  assert(TOOL_CATALOG.length === 20, `20 tools (got ${TOOL_CATALOG.length})`);
+  assert(
+    TOOL_CATALOG.length === EXPECTED_TOOL_COUNT,
+    `${EXPECTED_TOOL_COUNT} tools (got ${TOOL_CATALOG.length})`
+  );
+  assert(TOOL_NAMES.has("list_devices"), "has list_devices");
   assert(TOOL_NAMES.has("execute_command_stream"), "has execute_command_stream");
   assert(TOOL_NAMES.has("read_file"), "has read_file");
   assert(TOOL_NAMES.has("get_environment"), "has get_environment");
@@ -361,17 +369,17 @@ async function main() {
   assert(toolsBody.jsonrpc === "2.0", "jsonrpc 2.0");
   assert(
     Array.isArray(toolsBody.result?.tools) &&
-      toolsBody.result!.tools!.length === 20,
-    "tools/list returns 20 tools (no daemon → full catalog)"
+      toolsBody.result!.tools!.length === EXPECTED_TOOL_COUNT,
+    `tools/list returns ${EXPECTED_TOOL_COUNT} tools (no daemon → full catalog)`
   );
 
   // --- 5a. S2 tools/list filtering ---
   console.log("\n5a. S2 tools/list filtering (policy_caps)");
   {
     const full = filterToolCatalog(null);
-    assert(full.length === 20, "null enabledTools → full catalog");
+    assert(full.length === EXPECTED_TOOL_COUNT, "null enabledTools → full catalog");
     const undef = filterToolCatalog(undefined);
-    assert(undef.length === 20, "undefined enabledTools → full catalog");
+    assert(undef.length === EXPECTED_TOOL_COUNT, "undefined enabledTools → full catalog");
 
     const readOnlySubset = [
       "read_file",
@@ -384,12 +392,12 @@ async function main() {
     ];
     const filtered = filterToolCatalog(readOnlySubset);
     assert(
-      filtered.length === readOnlySubset.length,
-      `filter shrinks to ${readOnlySubset.length} (got ${filtered.length})`
+      filtered.length === readOnlySubset.length + 1,
+      `filter shrinks to daemon tools plus list_devices (got ${filtered.length})`
     );
     assert(
-      filtered.every((t) => readOnlySubset.includes(t.name)),
-      "filtered tools only from enabled set"
+      filtered.every((t) => readOnlySubset.includes(t.name) || t.name === "list_devices"),
+      "filtered tools only from enabled set plus worker-local tools"
     );
     assert(
       !filtered.some((t) => t.name === "write_file"),
@@ -403,9 +411,13 @@ async function main() {
       filtered.some((t) => t.name === "get_environment"),
       "get_environment remains"
     );
+    assert(
+      filtered.some((t) => t.name === "list_devices"),
+      "list_devices remains as a worker-local tool"
+    );
 
     const asSet = filterToolCatalog(new Set(["get_environment", "read_file"]));
-    assert(asSet.length === 2, "Set input filters to 2 tools");
+    assert(asSet.length === 3, "Set input filters to 2 daemon tools plus list_devices");
 
     // TunnelDO: mock policy_caps then tools/list shrinks.
     const doInst = new TunnelDO(
@@ -417,15 +429,16 @@ async function main() {
       "DO starts with null enabledTools"
     );
     const before = filterToolCatalog(doInst.getEnabledToolsForTest());
-    assert(before.length === 20, "pre-caps list is full catalog");
+    assert(before.length === EXPECTED_TOOL_COUNT, "pre-caps list is full catalog");
 
     doInst.applyPolicyCapsForTest({ tools: readOnlySubset });
     const afterCaps = doInst.getEnabledToolsForTest();
     assert(afterCaps !== null && afterCaps.size === readOnlySubset.length, "caps applied");
     const afterList = filterToolCatalog(afterCaps);
     assert(
-      afterList.length < 20 && afterList.length === readOnlySubset.length,
-      "after policy_caps tools/list length shrinks"
+      afterList.length < EXPECTED_TOOL_COUNT &&
+        afterList.length === readOnlySubset.length + 1,
+      "after policy_caps tools/list length shrinks and keeps worker-local tools"
     );
     assert(
       !afterList.some((t) =>
@@ -434,6 +447,10 @@ async function main() {
         )
       ),
       "mutating tools absent after read_only-style caps"
+    );
+    assert(
+      afterList.some((t) => t.name === "list_devices"),
+      "list_devices present after policy_caps filtering"
     );
 
     // Edge path: online device + Fake DO with restricted caps.
@@ -460,12 +477,17 @@ async function main() {
     const listed = filteredListBody.result?.tools ?? [];
     assert(filteredListRes.status === 200, "filtered tools/list → 200");
     assert(
-      listed.length === readOnlySubset.length && listed.length < 20,
+      listed.length === readOnlySubset.length + 1 &&
+        listed.length < EXPECTED_TOOL_COUNT,
       `edge tools/list shrinks (got ${listed.length})`
     );
     assert(
       listed.some((t) => t.name === "get_environment"),
       "edge list includes get_environment"
+    );
+    assert(
+      listed.some((t) => t.name === "list_devices"),
+      "edge list includes list_devices"
     );
     assert(
       !listed.some((t) => t.name === "write_file"),
@@ -682,6 +704,7 @@ async function main() {
   const devicesStatic = await readStaticResource("deckagent://devices", env);
   assert(devicesStatic !== null, "devices static resource resolves");
   const devicesParsed = JSON.parse(devicesStatic!.text) as {
+    preferred_device_id?: string | null;
     devices?: Array<{ id: string; status: string }>;
   };
   assert(
@@ -690,9 +713,225 @@ async function main() {
     "devices resource includes online registered device"
   );
   assert(
+    devicesParsed.preferred_device_id === null,
+    "devices resource includes null preferred_device_id by default"
+  );
+  assert(
     (await listRegisteredDeviceIds(env)).includes(deviceId),
     "listRegisteredDeviceIds includes test device"
   );
+
+  // --- 5d. F8 devices tool + sticky preferred device ---
+  console.log("\n5d. F8 devices tool + sticky preferred device");
+  const firstUuid = "11111111-1111-4111-8111-111111111111";
+  const preferredUuid = "22222222-2222-4222-8222-222222222222";
+  await setDevice(env, firstUuid, {
+    id: firstUuid,
+    name: "First UUID Device",
+    status: "offline",
+    token_hash: await hashToken("first-token"),
+    capabilities: [],
+    last_seen: Date.now(),
+  });
+  await setDevice(env, preferredUuid, {
+    id: preferredUuid,
+    name: "Preferred UUID Device",
+    status: "offline",
+    token_hash: await hashToken("preferred-token"),
+    capabilities: [],
+    last_seen: Date.now(),
+  });
+  await updateDeviceStatus(env, firstUuid, "online");
+  await updateDeviceStatus(env, preferredUuid, "online");
+
+  const apiDevicesRes = await worker.fetch(
+    new Request(url("/api/devices"), {
+      method: "GET",
+      headers: { authorization: `Bearer ${API_TOKEN}` },
+    }),
+    env
+  );
+  const apiDevicesBody = (await apiDevicesRes.json()) as {
+    preferred_device_id?: string | null;
+    devices?: Array<{ id: string; status: string; last_seen: number | null }>;
+  };
+  assert(apiDevicesRes.status === 200, `GET /api/devices → 200 (got ${apiDevicesRes.status})`);
+  assert(
+    apiDevicesBody.preferred_device_id === null &&
+      apiDevicesBody.devices?.some((d) => d.id === preferredUuid && d.status === "online"),
+    "GET /api/devices includes online devices and null preferred_device_id"
+  );
+
+  const listDevicesToolRes = await worker.fetch(
+    new Request(url("/mcp"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${API_TOKEN}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 81,
+        method: "tools/call",
+        params: { name: "list_devices", arguments: {} },
+      }),
+    }),
+    env
+  );
+  const listDevicesToolBody = (await listDevicesToolRes.json()) as {
+    result?: { devices?: Array<{ id: string; name: string; status: string }> };
+  };
+  assert(
+    listDevicesToolRes.status === 200,
+    `list_devices tools/call → 200 (got ${listDevicesToolRes.status})`
+  );
+  assert(
+    listDevicesToolBody.result?.devices?.some(
+      (d) => d.id === preferredUuid && d.name === "Preferred UUID Device" && d.status === "online"
+    ) === true,
+    "list_devices returns registered online device"
+  );
+
+  const preferRes = await worker.fetch(
+    new Request(url("/api/devices/prefer"), {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${API_TOKEN}`,
+      },
+      body: JSON.stringify({ device_id: preferredUuid }),
+    }),
+    env
+  );
+  const preferBody = (await preferRes.json()) as {
+    ok?: boolean;
+    preferred_device_id?: string;
+  };
+  assert(
+    preferRes.status === 200 &&
+      preferBody.ok === true &&
+      preferBody.preferred_device_id === preferredUuid,
+    "PUT /api/devices/prefer stores sticky device"
+  );
+
+  const devicesPreferred = await readStaticResource("deckagent://devices", env);
+  const devicesPreferredParsed = JSON.parse(devicesPreferred!.text) as {
+    preferred_device_id?: string | null;
+  };
+  assert(
+    devicesPreferredParsed.preferred_device_id === preferredUuid,
+    "devices resource includes preferred_device_id"
+  );
+
+  env._do.lastRoutedDeviceId = null;
+  const stickyCallRes = await worker.fetch(
+    new Request(url("/mcp"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${API_TOKEN}`,
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 82,
+        method: "tools/call",
+        params: { name: "get_environment", arguments: {} },
+      }),
+    }),
+    env
+  );
+  assert(
+    stickyCallRes.status === 503 && env._do.lastRoutedDeviceId === preferredUuid,
+    "sticky preferred device resolves multi-device tools/call before DO forward"
+  );
+
+  env._do.lastRoutedDeviceId = null;
+  const headerOverrideRes = await worker.fetch(
+    new Request(url("/mcp"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${API_TOKEN}`,
+        "X-DeckAgent-Device-Id": firstUuid,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 83,
+        method: "tools/call",
+        params: { name: "get_environment", arguments: {} },
+      }),
+    }),
+    env
+  );
+  assert(
+    headerOverrideRes.status === 503 && env._do.lastRoutedDeviceId === firstUuid,
+    "X-DeckAgent-Device-Id overrides sticky preferred device"
+  );
+
+  env._do.lastRoutedDeviceId = null;
+  const paramsOverrideRes = await worker.fetch(
+    new Request(url("/mcp"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${API_TOKEN}`,
+        "X-DeckAgent-Device-Id": firstUuid,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 84,
+        method: "tools/call",
+        params: {
+          name: "get_environment",
+          arguments: {},
+          deviceId: preferredUuid,
+        },
+      }),
+    }),
+    env
+  );
+  assert(
+    paramsOverrideRes.status === 503 && env._do.lastRoutedDeviceId === preferredUuid,
+    "params.deviceId overrides X-DeckAgent-Device-Id"
+  );
+
+  const clearPreferRes = await worker.fetch(
+    new Request(url("/api/devices/prefer"), {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${API_TOKEN}` },
+    }),
+    env
+  );
+  assert(clearPreferRes.status === 200, "DELETE /api/devices/prefer → 200");
+
+  const ambiguousAfterClearRes = await worker.fetch(
+    new Request(url("/mcp"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${API_TOKEN}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 85,
+        method: "tools/call",
+        params: { name: "get_environment", arguments: {} },
+      }),
+    }),
+    env
+  );
+  const ambiguousAfterClearBody = (await ambiguousAfterClearRes.json()) as {
+    error?: { data?: { code?: string } };
+  };
+  assert(
+    ambiguousAfterClearRes.status === 400 &&
+      ambiguousAfterClearBody.error?.data?.code === "DEVICE_AMBIGUOUS",
+    "clearing sticky restores DEVICE_AMBIGUOUS with multiple online devices"
+  );
+
+  await updateDeviceStatus(env, firstUuid, "offline");
+  await updateDeviceStatus(env, preferredUuid, "offline");
 
   const unknownRes = await worker.fetch(
     new Request(url("/mcp"), {

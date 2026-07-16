@@ -2,8 +2,17 @@ import type { Env, DeviceInfo, DeviceStatus } from "./types.js";
 
 const DEVICE_PREFIX = "device:";
 const DEVICE_ONLINE_PREFIX = "device_online:";
+const DEFAULT_DEVICE_PREF_KEY = "pref:default_device";
 /** Presence TTL (seconds). Registration keys never use this. */
 const PRESENCE_TTL = 90;
+
+export interface DeviceSummary {
+  id: string;
+  name: string;
+  status: DeviceStatus;
+  capabilities: string[];
+  last_seen: number | null;
+}
 
 export async function getDevice(
   env: Env,
@@ -104,24 +113,89 @@ export async function listRegisteredDeviceIds(env: Env): Promise<string[]> {
   return listed.keys.map((k) => k.name.slice(DEVICE_PREFIX.length));
 }
 
+export async function getPreferredDeviceId(env: Env): Promise<string | null> {
+  const raw = await env.DECK_KV.get(DEFAULT_DEVICE_PREF_KEY);
+  const preferred = raw?.trim();
+  return preferred ? preferred : null;
+}
+
+export async function setPreferredDeviceId(
+  env: Env,
+  deviceId: string
+): Promise<void> {
+  await env.DECK_KV.put(DEFAULT_DEVICE_PREF_KEY, deviceId);
+}
+
+export async function clearPreferredDeviceId(env: Env): Promise<void> {
+  await env.DECK_KV.delete(DEFAULT_DEVICE_PREF_KEY);
+}
+
+export async function listDevices(env: Env): Promise<DeviceSummary[]> {
+  const registeredIds = await listRegisteredDeviceIds(env);
+  const onlineIds = new Set(await listOnlineDevices(env));
+
+  const devices: DeviceSummary[] = [];
+  for (const id of registeredIds) {
+    const info = await getDevice(env, id);
+    if (!info) continue;
+    devices.push({
+      id: info.id,
+      name: info.name,
+      status: onlineIds.has(id) ? "online" : "offline",
+      capabilities: info.capabilities,
+      last_seen: info.last_seen,
+    });
+  }
+
+  // Include any online presence keys that somehow lack registration.
+  for (const id of onlineIds) {
+    if (registeredIds.includes(id)) continue;
+    devices.push({
+      id,
+      name: id,
+      status: "online",
+      capabilities: [],
+      last_seen: null,
+    });
+  }
+
+  return devices;
+}
+
 /**
  * Resolve which device should handle a tools/call.
- * - Explicit deviceId: use it (must be online).
- * - Omitted: use the sole online device, or error if zero/multiple.
+ * - Explicit params.deviceId: use it (must be online).
+ * - Header X-DeckAgent-Device-Id: use it (must be online).
+ * - Sticky preferred device: use it if online.
+ * - Otherwise use the sole online device, or error if zero/multiple.
  */
 export async function resolveTargetDeviceId(
   env: Env,
-  requestedDeviceId?: string
+  requestedDeviceId?: string,
+  headerDeviceId?: string | null
 ): Promise<{ deviceId: string } | { error: string; message: string }> {
-  if (requestedDeviceId) {
-    const online = await isDeviceOnline(env, requestedDeviceId);
+  const explicitDeviceId = requestedDeviceId?.trim();
+  if (explicitDeviceId) {
+    const online = await isDeviceOnline(env, explicitDeviceId);
     if (!online) {
       return {
         error: "DEVICE_OFFLINE",
-        message: `Device '${requestedDeviceId}' is not online`,
+        message: `Device '${explicitDeviceId}' is not online`,
       };
     }
-    return { deviceId: requestedDeviceId };
+    return { deviceId: explicitDeviceId };
+  }
+
+  const headerTarget = headerDeviceId?.trim();
+  if (headerTarget) {
+    const online = await isDeviceOnline(env, headerTarget);
+    if (!online) {
+      return {
+        error: "DEVICE_OFFLINE",
+        message: `Device '${headerTarget}' is not online`,
+      };
+    }
+    return { deviceId: headerTarget };
   }
 
   const online = await listOnlineDevices(env);
@@ -131,6 +205,12 @@ export async function resolveTargetDeviceId(
       message: "No daemon connected. Start the desktop daemon and try again.",
     };
   }
+
+  const preferredDeviceId = await getPreferredDeviceId(env);
+  if (preferredDeviceId && online.includes(preferredDeviceId)) {
+    return { deviceId: preferredDeviceId };
+  }
+
   if (online.length > 1) {
     return {
       error: "DEVICE_AMBIGUOUS",

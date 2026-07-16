@@ -20,6 +20,7 @@ import { runTunnel } from './tunnel.js';
 import { runWorkspaceCommand } from './workspace.js';
 import { runSecretCommand } from './secrets.js';
 import { runPolicyCommand } from './policy-cmd.js';
+import { runDeviceCommand } from './device-cmd.js';
 import { openControlUi } from './ui.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -44,6 +45,9 @@ Usage:
   deckagent daemon --status    Check if the daemon is running
   deckagent logs [--follow] [--lines N]  Tail daemon logs (follows on TTY by default)
   deckagent tunnel [--name NAME] [--url URL]  Cloudflare Tunnel to local wrangler (dev)
+  deckagent device list        List registered devices from the Worker
+  deckagent device prefer <id> Set sticky preferred device
+  deckagent device clear       Clear sticky preferred device
   deckagent workspace use <path>  Set active workspace (project scope)
   deckagent workspace status   Show current workspace
   deckagent workspace clear    Clear workspace from config
@@ -167,6 +171,11 @@ async function main(): Promise<void> {
 
     case 'policy': {
       await runPolicyCommand(args.slice(1));
+      break;
+    }
+
+    case 'device': {
+      await runDeviceCommand(args.slice(1));
       break;
     }
 

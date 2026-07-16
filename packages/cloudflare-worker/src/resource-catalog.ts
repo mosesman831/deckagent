@@ -1,9 +1,8 @@
 import type { Env } from "./types.js";
 import { MCP_INSTRUCTIONS } from "./prompt-catalog.js";
 import {
-  getDevice,
-  listOnlineDevices,
-  listRegisteredDeviceIds,
+  getPreferredDeviceId,
+  listDevices,
 } from "./device-registry.js";
 
 export interface McpResourceSummary {
@@ -132,33 +131,12 @@ export async function readStaticResource(
 }
 
 async function buildDevicesJson(env: Env): Promise<string> {
-  const registeredIds = await listRegisteredDeviceIds(env);
-  const onlineIds = new Set(await listOnlineDevices(env));
-
-  const devices = [];
-  for (const id of registeredIds) {
-    const info = await getDevice(env, id);
-    if (!info) continue;
-    devices.push({
-      id: info.id,
-      name: info.name,
-      status: onlineIds.has(id) ? "online" : "offline",
-      capabilities: info.capabilities,
-      last_seen: info.last_seen,
-    });
-  }
-
-  // Include any online presence keys that somehow lack registration.
-  for (const id of onlineIds) {
-    if (registeredIds.includes(id)) continue;
-    devices.push({
-      id,
-      name: id,
-      status: "online" as const,
-      capabilities: [] as string[],
-      last_seen: null as number | null,
-    });
-  }
-
-  return JSON.stringify({ devices }, null, 2);
+  return JSON.stringify(
+    {
+      preferred_device_id: await getPreferredDeviceId(env),
+      devices: await listDevices(env),
+    },
+    null,
+    2
+  );
 }
