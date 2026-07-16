@@ -12,7 +12,11 @@ import {
   checkToolAllowed,
   applyPathDefaults,
   resolveArgsPaths,
+  normalizePolicy,
+  getEnabledTools,
+  getCapabilities,
 } from "./policy.js";
+import type { Capabilities } from "./capabilities.js";
 import type { Logger } from "./logger.js";
 import {
   ConfirmationServer,
@@ -75,7 +79,7 @@ export class ToolExecutor {
 
   constructor(options: ToolExecutorOptions) {
     this.toolRegistry = options.toolRegistry;
-    this.policy = options.policy;
+    this.policy = normalizePolicy(options.policy);
     this.workspace = options.workspace ?? null;
     this.logger = options.logger;
     this.confirmationServer = options.confirmationServer;
@@ -95,6 +99,16 @@ export class ToolExecutor {
     return this.policy;
   }
 
+  /** Enabled MCP tool names for Worker tools/list filtering (S2). */
+  getEnabledTools(): string[] {
+    return getEnabledTools(this.policy);
+  }
+
+  /** Full capability matrix + enabled_tools for policy_caps tunnel message. */
+  getCapabilities(): Capabilities {
+    return getCapabilities(this.policy);
+  }
+
   getWorkspace(): WorkspacePolicy | null {
     return this.workspace;
   }
@@ -104,9 +118,10 @@ export class ToolExecutor {
   }
 
   updatePolicy(policy: Policy): void {
-    this.policy = policy;
+    // Always re-normalize so read_only / profile hard forces cannot be skipped.
+    this.policy = normalizePolicy(policy);
     try {
-      setMaxFileReadSize(policy.max_file_read_size);
+      setMaxFileReadSize(this.policy.max_file_read_size);
     } catch {
       // ignore
     }

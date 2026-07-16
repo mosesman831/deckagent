@@ -9,6 +9,11 @@ import type { ConfirmationServer } from "./confirmation-server.js";
 import type { Policy } from "./policy.js";
 import { writePolicy, getPolicyPath } from "./policy.js";
 import { readRecentAuditLog } from "./audit-log.js";
+import {
+  UNLOCK_HEADER,
+  extractUnlockToken,
+  validateAndConsumeUnlockToken,
+} from "./policy-lock.js";
 
 export const CONTROL_UI_HOST = "127.0.0.1";
 export const CONTROL_UI_PORT = 9150;
@@ -33,6 +38,8 @@ export interface ControlUiOptions {
   port?: number;
   /** Override audit log dir (tests). */
   auditLogDir?: string;
+  /** Override ~/.deckagent for unlock.token (tests). */
+  unlockTokenDir?: string;
 }
 
 /**
@@ -49,6 +56,7 @@ export class ControlUiServer {
   private host: string;
   private port: number;
   private auditLogDir?: string;
+  private unlockTokenDir?: string;
 
   constructor(options: ControlUiOptions) {
     this.logger = options.logger;
@@ -59,6 +67,7 @@ export class ControlUiServer {
     this.host = options.host ?? CONTROL_UI_HOST;
     this.port = options.port ?? CONTROL_UI_PORT;
     this.auditLogDir = options.auditLogDir;
+    this.unlockTokenDir = options.unlockTokenDir;
   }
 
   get baseUrl(): string {
@@ -190,9 +199,50 @@ export class ControlUiServer {
         return;
       }
 
+      if (method === "POST" && url.pathname === "/api/policy/unlock") {
+        const body = await readJsonBody(req);
+        const token = extractUnlockToken({
+          headerValue: req.headers[UNLOCK_HEADER],
+          body,
+        });
+        if (
+          !validateAndConsumeUnlockToken(token, this.unlockTokenDir)
+        ) {
+          sendJson(res, 403, {
+            error: "Invalid or expired unlock token",
+            code: "PROFILE_LOCKED",
+          });
+          return;
+        }
+        const current = this.getPolicy();
+        const unlocked: Policy = { ...current, profile_locked: false };
+        writePolicy(unlocked);
+        this.setPolicy(unlocked);
+        this.logger.info("Policy unlocked via Control UI step-up");
+        sendJson(res, 200, { ok: true, ...policySubset(unlocked) });
+        return;
+      }
+
       if (method === "POST" && url.pathname === "/api/policy") {
         const body = await readJsonBody(req);
-        const updated = applyPolicySubset(this.getPolicy(), body);
+        const current = this.getPolicy();
+        if (current.profile_locked) {
+          const token = extractUnlockToken({
+            headerValue: req.headers[UNLOCK_HEADER],
+            body,
+          });
+          if (
+            !validateAndConsumeUnlockToken(token, this.unlockTokenDir)
+          ) {
+            sendJson(res, 403, {
+              error:
+                "Policy changes are locked. Run `deckagent policy unlock` and retry with X-DeckAgent-Unlock.",
+              code: "PROFILE_LOCKED",
+            });
+            return;
+          }
+        }
+        const updated = applyPolicySubset(current, body);
         writePolicy(updated);
         this.setPolicy(updated);
         sendJson(res, 200, policySubset(updated));
@@ -213,6 +263,8 @@ export class ControlUiServer {
 
 function policySubset(policy: Policy): Record<string, unknown> {
   return {
+    profile: policy.profile ?? null,
+    profile_locked: policy.profile_locked,
     read_only: policy.read_only,
     allow_browser: policy.allow_browser,
     allow_terminal: policy.allow_terminal,
@@ -512,44 +564,61 @@ function renderDashboard(): string {
     async function refreshPolicy() {
       const p = await fetchJson("/api/policy");
       const el = document.getElementById("policy");
+      const locked = !!p.profile_locked;
       const toggles = [
         { key: "read_only", label: "Read only" },
         { key: "allow_browser", label: "Allow browser" },
         { key: "allow_terminal", label: "Allow terminal" },
       ];
-      let html = toggles.map(function (t) {
+      let html = '<div class="row"><span class="label">Profile</span><span>' +
+        esc(p.profile || "—") + (locked ? ' <span class="badge offline">LOCKED</span>' : "") +
+        "</span></div>";
+      if (locked) {
+        html += '<p class="empty">Policy is locked. Run <code>deckagent policy unlock</code> then POST /api/policy/unlock.</p>';
+      }
+      html += toggles.map(function (t) {
         const on = !!p[t.key];
-        return '<button class="toggle' + (on ? " active" : "") + '" data-key="' + t.key + '" data-val="' + (!on) + '">' +
+        return '<button class="toggle' + (on ? " active" : "") + '" data-key="' + t.key + '" data-val="' + (!on) + '"' +
+          (locked ? " disabled" : "") + ">" +
           t.label + ": <strong>" + (on ? "ON" : "OFF") + "</strong></button>";
       }).join("");
       html += '<div class="row" style="margin-top:12px"><span class="label">Command mode</span>' +
-        '<select id="command_mode">' +
+        '<select id="command_mode"' + (locked ? " disabled" : "") + ">" +
         '<option value="blocklist"' + (p.command_mode === "blocklist" ? " selected" : "") + '>blocklist</option>' +
         '<option value="allowlist"' + (p.command_mode === "allowlist" ? " selected" : "") + '>allowlist</option>' +
         '</select></div>';
       el.innerHTML = html;
+      if (locked) return;
       el.querySelectorAll("button.toggle").forEach(function (btn) {
         btn.addEventListener("click", async function () {
           const key = btn.getAttribute("data-key");
           const val = btn.getAttribute("data-val") === "true";
           const body = {};
           body[key] = val;
-          await fetch("/api/policy", {
+          const res = await fetch("/api/policy", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
           });
+          if (!res.ok) {
+            const err = await res.json().catch(function () { return {}; });
+            alert(err.error || "Policy update failed");
+          }
           refreshPolicy();
         });
       });
       const sel = document.getElementById("command_mode");
       if (sel) {
         sel.addEventListener("change", async function () {
-          await fetch("/api/policy", {
+          const res = await fetch("/api/policy", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ command_mode: sel.value }),
           });
+          if (!res.ok) {
+            const err = await res.json().catch(function () { return {}; });
+            alert(err.error || "Policy update failed");
+          }
           refreshPolicy();
         });
       }

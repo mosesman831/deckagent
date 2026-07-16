@@ -52,6 +52,30 @@ export const DEFAULT_BUDGETS = {
   max_confirmations_per_hour: 60
 } as const;
 
+/** Wave 4 S1 — strict profile allowlist. */
+export const DEFAULT_STRICT_ALLOWED_COMMANDS = [
+  'git',
+  'npm',
+  'node',
+  'python',
+  'pytest',
+  'cargo',
+  'go',
+  'make'
+] as const;
+
+export const DEFAULT_PROTECTED_PATHS = [
+  '~/.ssh',
+  '~/.gnupg',
+  '~/.aws',
+  '~/.config/gcloud',
+  '**/.env',
+  '**/.env.*',
+  '**/credentials.json',
+  '**/id_rsa',
+  '**/id_ed25519'
+] as const;
+
 export const BudgetsSchema = z.object({
   max_tool_calls_per_hour: z.number().int().default(DEFAULT_BUDGETS.max_tool_calls_per_hour),
   max_shell_seconds_per_hour: z
@@ -68,29 +92,63 @@ export const BudgetsSchema = z.object({
     .default(DEFAULT_BUDGETS.max_confirmations_per_hour)
 });
 
-export const PolicySchema = z.object({
-  version: z.number().int().default(1),
-  allowed_directories: z.array(z.string()).default([]),
-  blocked_commands: z.array(z.string()).default([...DEFAULT_BLOCKED_COMMANDS]),
-  require_confirmation: z.array(z.string()).default([...DEFAULT_REQUIRE_CONFIRMATION]),
-  read_only: z.boolean().default(false),
-  // true: setup registers browser capabilities; daemon schema defaults false until policy is written
-  allow_browser: z.boolean().default(true),
-  allow_terminal: z.boolean().default(true),
-  allow_computer_use: z.boolean().default(false),
-  command_mode: z.enum(['blocklist', 'allowlist']).default('blocklist'),
-  allowed_commands: z.array(z.string()).default([]),
-  max_file_read_size: z.number().int().default(10 * 1024 * 1024),
-  max_command_timeout: z.number().int().default(300),
-  // Wave 3 F4 — vault injection into execute_command env
-  allow_secret_injection: z.boolean().default(true),
-  // Wave 3 F6
-  budgets: BudgetsSchema.default({ ...DEFAULT_BUDGETS })
+export const PathRulesSchema = z.object({
+  symlink_mode: z.enum(['deny_escape', 'deny_symlinks', 'follow']).default('deny_escape'),
+  allow_dotdot: z.boolean().default(false)
 });
+
+export const NetworkSchema = z.object({
+  allow_browser_hosts: z.array(z.string()).default([]),
+  deny_browser_hosts: z.array(z.string()).default([]),
+  block_shell_net_tools: z.boolean().default(false)
+});
+
+export const PolicySchema = z
+  .object({
+    version: z.number().int().default(2),
+    profile: z.enum(['strict', 'dev', 'locked']).default('strict'),
+    profile_locked: z.boolean().default(false),
+    allowed_directories: z.array(z.string()).default([]),
+    trusted_directories: z.array(z.string()).default([]),
+    denied_directories: z.array(z.string()).default([]),
+    protected_paths: z.array(z.string()).default([...DEFAULT_PROTECTED_PATHS]),
+    protected_path_policy: z.enum(['deny_all', 'deny_write']).default('deny_all'),
+    path_rules: PathRulesSchema.default({
+      symlink_mode: 'deny_escape',
+      allow_dotdot: false
+    }),
+    trusted_read_directories: z.array(z.string()).default([]),
+    trusted_write_directories: z.array(z.string()).default([]),
+    blocked_commands: z.array(z.string()).default([...DEFAULT_BLOCKED_COMMANDS]),
+    require_confirmation: z.array(z.string()).default([...DEFAULT_REQUIRE_CONFIRMATION]),
+    read_only: z.boolean().default(false),
+    read_only_mode: z.enum(['fs_read', 'meta_only']).default('fs_read'),
+    // true: setup registers browser capabilities; daemon schema defaults false until policy is written
+    allow_browser: z.boolean().default(true),
+    allow_terminal: z.boolean().default(true),
+    allow_computer_use: z.boolean().default(false),
+    command_mode: z.enum(['blocklist', 'allowlist']).default('blocklist'),
+    allowed_commands: z.array(z.string()).default([]),
+    terminal_mode: z.enum(['off', 'allowlist', 'blocklist', 'sandbox_fs']).default('blocklist'),
+    network: NetworkSchema.default({
+      allow_browser_hosts: [],
+      deny_browser_hosts: [],
+      block_shell_net_tools: false
+    }),
+    max_file_read_size: z.number().int().default(10 * 1024 * 1024),
+    max_command_timeout: z.number().int().default(300),
+    // Wave 3 F4 — vault injection into execute_command env
+    allow_secret_injection: z.boolean().default(true),
+    // Wave 3 F6
+    budgets: BudgetsSchema.default({ ...DEFAULT_BUDGETS }),
+    disable_builtin_protections: z.boolean().default(false)
+  })
+  .passthrough();
 
 export type Config = z.infer<typeof ConfigSchema>;
 export type Workspace = z.infer<typeof WorkspaceSchema>;
 export type Policy = z.infer<typeof PolicySchema>;
+export type SecurityProfile = Policy['profile'];
 
 export function getConfigDir(): string {
   const home = os.homedir();
@@ -130,49 +188,110 @@ export function generateConfig(deviceId: string, token: string, workerUrl: strin
 }
 
 /**
- * Safer defaults for strangers: Documents + Desktop when present, else ~/DeckAgent.
+ * Safer defaults for strangers: ~/DeckAgent (created if missing).
  * Never defaults to full $HOME.
  */
+export function getDefaultTrustedDirectory(): string {
+  const deckAgentDir = path.join(os.homedir(), 'DeckAgent');
+  fs.mkdirSync(deckAgentDir, { recursive: true });
+  return deckAgentDir;
+}
+
+/**
+ * @deprecated Prefer getDefaultTrustedDirectory — kept for workspace helpers.
+ */
 export function getDefaultAllowedDirectories(): string[] {
-  const home = os.homedir();
-  const documents = path.join(home, 'Documents');
-  const desktop = path.join(home, 'Desktop');
-  const dirs: string[] = [];
+  return [getDefaultTrustedDirectory()];
+}
 
-  if (fs.existsSync(documents)) {
-    dirs.push(documents);
-  }
-  if (fs.existsSync(desktop)) {
-    dirs.push(desktop);
+/** Profile-specific hard defaults (does not silently widen overrides). */
+export function applyProfileDefaults(
+  profile: SecurityProfile,
+  base: Partial<Policy> = {}
+): Partial<Policy> {
+  if (profile === 'strict' || profile === 'locked') {
+    const allowTerminal = base.allow_terminal ?? false;
+    return {
+      ...base,
+      profile,
+      profile_locked: profile === 'locked',
+      version: 2,
+      command_mode: 'allowlist',
+      terminal_mode: allowTerminal ? 'allowlist' : 'off',
+      allowed_commands: [...DEFAULT_STRICT_ALLOWED_COMMANDS],
+      allow_browser: false,
+      allow_secret_injection: false,
+      allow_terminal: allowTerminal,
+      protected_path_policy: 'deny_all',
+      network: {
+        allow_browser_hosts: [],
+        deny_browser_hosts: ['*'],
+        block_shell_net_tools: true
+      },
+      path_rules: {
+        symlink_mode: 'deny_escape',
+        allow_dotdot: false
+      },
+      protected_paths:
+        base.protected_paths && base.protected_paths.length > 0
+          ? base.protected_paths
+          : [...DEFAULT_PROTECTED_PATHS]
+    };
   }
 
-  if (dirs.length === 0) {
-    const deckAgentDir = path.join(home, 'DeckAgent');
-    fs.mkdirSync(deckAgentDir, { recursive: true });
-    dirs.push(deckAgentDir);
-  }
-
-  return dirs;
+  // dev
+  return {
+    ...base,
+    profile: 'dev',
+    profile_locked: false,
+    version: 2,
+    command_mode: base.command_mode ?? 'blocklist',
+    terminal_mode: base.terminal_mode ?? (base.allow_terminal === false ? 'off' : 'blocklist'),
+    allow_browser: base.allow_browser ?? true,
+    allow_terminal: base.allow_terminal ?? true,
+    allow_secret_injection: base.allow_secret_injection ?? true,
+    protected_path_policy: base.protected_path_policy ?? 'deny_write',
+    network: base.network ?? {
+      allow_browser_hosts: [],
+      deny_browser_hosts: [],
+      block_shell_net_tools: false
+    },
+    path_rules: base.path_rules ?? {
+      symlink_mode: 'deny_escape',
+      allow_dotdot: false
+    }
+  };
 }
 
 export function generateDefaultPolicy(overrides: Partial<Policy> = {}): Policy {
-  return {
-    version: 1,
-    allowed_directories: getDefaultAllowedDirectories(),
+  const profile = overrides.profile ?? 'strict';
+  const trusted =
+    overrides.trusted_directories && overrides.trusted_directories.length > 0
+      ? overrides.trusted_directories
+      : overrides.allowed_directories && overrides.allowed_directories.length > 0
+        ? overrides.allowed_directories
+        : [getDefaultTrustedDirectory()];
+
+  const profileDefaults = applyProfileDefaults(profile, {
+    trusted_directories: trusted,
+    allowed_directories: trusted,
+    ...overrides
+  });
+
+  return PolicySchema.parse({
     blocked_commands: [...DEFAULT_BLOCKED_COMMANDS],
     require_confirmation: [...DEFAULT_REQUIRE_CONFIRMATION],
     read_only: false,
-    allow_browser: true,
-    allow_terminal: true,
     allow_computer_use: false,
-    command_mode: 'blocklist',
-    allowed_commands: [],
     max_file_read_size: 10 * 1024 * 1024,
     max_command_timeout: 300,
-    allow_secret_injection: true,
     budgets: { ...DEFAULT_BUDGETS },
-    ...overrides
-  };
+    denied_directories: [],
+    trusted_read_directories: [],
+    trusted_write_directories: [],
+    disable_builtin_protections: false,
+    ...profileDefaults
+  });
 }
 
 function writeSecureJson(filePath: string, data: unknown): void {
@@ -214,6 +333,10 @@ export function configExists(): boolean {
   return fs.existsSync(getConfigPath());
 }
 
+export function policyExists(): boolean {
+  return fs.existsSync(getPolicyPath());
+}
+
 export function askQuestion(query: string): Promise<string> {
   const rl = readline.createInterface({
     input: process.stdin,
@@ -247,10 +370,18 @@ export function maskSecret(value: string): string {
 }
 
 export function printSecuritySummary(policy: Policy): void {
+  const trusted =
+    policy.trusted_directories.length > 0
+      ? policy.trusted_directories
+      : policy.allowed_directories;
   console.log('--- Security summary ---');
-  console.log(`  Allowed directories: ${policy.allowed_directories.join(', ') || '(none)'}`);
+  console.log(`  Profile:            ${policy.profile}${policy.profile_locked ? ' (LOCKED)' : ''}`);
+  console.log(`  Trusted directories: ${trusted.join(', ') || '(none)'}`);
+  if (policy.denied_directories.length > 0) {
+    console.log(`  Denied directories:  ${policy.denied_directories.join(', ')}`);
+  }
   console.log(`  Read-only mode:     ${policy.read_only ? 'ON' : 'OFF'}`);
-  console.log(`  Terminal tools:     ${policy.allow_terminal ? 'allowed' : 'disabled'}`);
+  console.log(`  Terminal tools:     ${policy.allow_terminal ? 'allowed' : 'disabled'} (${policy.terminal_mode})`);
   console.log(`  Browser tools:      ${policy.allow_browser ? 'allowed' : 'disabled'}`);
   console.log(
     `  Confirm mutations:  ${
@@ -259,68 +390,67 @@ export function printSecuritySummary(policy: Policy): void {
         : 'OFF'
     }`
   );
-  console.log(`  Blocked commands:   ${policy.blocked_commands.join(', ')}`);
+  console.log(`  Command mode:       ${policy.command_mode}`);
+  if (policy.command_mode === 'allowlist') {
+    console.log(`  Allowed commands:   ${policy.allowed_commands.join(', ') || '(none)'}`);
+  } else {
+    console.log(`  Blocked commands:   ${policy.blocked_commands.join(', ')}`);
+  }
   console.log(`  Policy file:        ${getPolicyPath()} (mode 0600)`);
   console.log('');
 }
 
 /**
- * Interactive first-run policy prompts with stranger-safe defaults.
+ * Interactive first-run policy prompts. Defaults to strict profile + ~/DeckAgent.
  */
 export async function promptForPolicy(): Promise<Policy> {
   console.log('\n--- Security Policy ---');
-  console.log('DeckAgent will only access directories you allow (not your full home folder by default).\n');
+  console.log('DeckAgent enforces access in the local daemon (not via prompts to the model).\n');
 
-  const allowed = getDefaultAllowedDirectories();
-  console.log(`Default allowed directories:\n  ${allowed.map((d) => `- ${d}`).join('\n')}`);
+  const profileAnswer = await askQuestion('Security profile? [strict/dev] (default strict): ');
+  const normalized = profileAnswer.toLowerCase();
+  const profile: SecurityProfile =
+    normalized === 'dev' ? 'dev' : normalized === 'locked' ? 'locked' : 'strict';
 
-  const addMore = await askYesNo('Add more allowed directories?', false);
-  if (addMore) {
-    const extra = await askQuestion(
-      'Enter additional directories (comma-separated, ~ expanded): '
-    );
-    if (extra) {
-      for (const part of extra.split(',')) {
-        const trimmed = part.trim();
-        if (!trimmed) continue;
-        const expanded = trimmed.startsWith('~')
-          ? path.join(os.homedir(), trimmed.slice(1).replace(/^\//, ''))
-          : path.resolve(trimmed);
-        if (!allowed.includes(expanded)) {
-          allowed.push(expanded);
-        }
-      }
-    }
+  const defaultTrusted = getDefaultTrustedDirectory();
+  const trustedAnswer = await askQuestion(
+    `Trusted project directory? (default ${defaultTrusted}): `
+  );
+  let trustedPath = defaultTrusted;
+  if (trustedAnswer) {
+    trustedPath = trustedAnswer.startsWith('~')
+      ? path.join(os.homedir(), trustedAnswer.slice(1).replace(/^\//, ''))
+      : path.resolve(trustedAnswer);
   }
+  fs.mkdirSync(trustedPath, { recursive: true });
 
-  // Confirmation stays ON by default for mutating tools.
+  const allowTerminal =
+    profile === 'strict' || profile === 'locked'
+      ? await askYesNo('Enable terminal tools? (strict uses an allowlist)', false)
+      : await askYesNo('Enable terminal tools?', true);
+
+  const allowBrowser =
+    profile === 'dev'
+      ? await askYesNo('Enable browser tools?', false)
+      : false;
+
   const keepConfirmation = await askYesNo(
     'Require confirmation for mutating tools (write/edit/move/execute/kill)?',
     true
   );
 
-  const readOnly = await askYesNo(
-    'Start in read-only mode? (recommended for first run)',
-    true
-  );
-
-  let allowTerminal = true;
-  if (readOnly) {
-    const narrowTerminal = await askYesNo(
-      'Also disable terminal tools while in read-only mode? (narrower surface)',
-      false
-    );
-    allowTerminal = !narrowTerminal;
-    if (!narrowTerminal) {
-      console.log('Terminal stays enabled; read_only still blocks mutating filesystem tools.');
-    }
-  }
-
   const policy = generateDefaultPolicy({
-    allowed_directories: allowed,
+    profile,
+    trusted_directories: [trustedPath],
+    allowed_directories: [trustedPath],
+    allow_terminal: allowTerminal,
+    allow_browser: allowBrowser,
     require_confirmation: keepConfirmation ? [...DEFAULT_REQUIRE_CONFIRMATION] : [],
-    read_only: readOnly,
-    allow_terminal: allowTerminal
+    terminal_mode: allowTerminal
+      ? profile === 'dev'
+        ? 'blocklist'
+        : 'allowlist'
+      : 'off'
   });
 
   printSecuritySummary(policy);

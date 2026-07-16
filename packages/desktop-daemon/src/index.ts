@@ -10,7 +10,7 @@ import {
   type ToolRegistry,
 } from "@deckagent/mcp-server";
 import { readConfig, getConfigPath, applyWorkspaceContext } from "./config.js";
-import { readPolicy, getPolicyPath, type Policy } from "./policy.js";
+import { readPolicy, getPolicyPath, normalizePolicy, type Policy } from "./policy.js";
 import { Logger } from "./logger.js";
 import { TunnelClient } from "./tunnel-client.js";
 import { ConfirmationServer } from "./confirmation-server.js";
@@ -18,6 +18,10 @@ import { LocalTunnelServer } from "./local-server.js";
 import { ToolExecutor } from "./tool-executor.js";
 import { ControlUiServer } from "./control-ui.js";
 import { DAEMON_VERSION, PROTOCOL_VERSION } from "./version.js";
+import {
+  getCapabilityFlags,
+  getEnabledTools,
+} from "./capabilities.js";
 
 const DECK_DIR = join(homedir(), ".deckagent");
 const PID_FILE = join(DECK_DIR, "daemon.pid");
@@ -107,8 +111,11 @@ function checkStatus(): void {
 }
 
 function applyRuntimePolicy(policy: Policy, enableBrowserFlag: boolean): Policy {
-  if (!enableBrowserFlag) return policy;
-  return { ...policy, allow_browser: true };
+  const normalized = normalizePolicy(policy);
+  if (!enableBrowserFlag) return normalized;
+  // Cannot enable browser while read_only (S4 hard gate).
+  if (normalized.read_only) return normalized;
+  return normalizePolicy({ ...normalized, allow_browser: true });
 }
 
 async function main(): Promise<void> {
@@ -148,10 +155,25 @@ async function main(): Promise<void> {
 
   let policy: Policy;
   try {
+    // readPolicy always runs normalizePolicy (profile + read_only hard forces).
     policy = applyRuntimePolicy(readPolicy(), enableBrowserFlag);
   } catch (err) {
     console.error(`Failed to read policy: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
+  }
+
+  if (policy.disable_builtin_protections) {
+    console.error(
+      "[deckagent] WARNING: disable_builtin_protections=true — builtin ~/.ssh/.env protections are OFF",
+    );
+  }
+
+  if (policy.profile_locked) {
+    // TODO(Agent C): Control UI POST /api/policy must return 403 PROFILE_LOCKED
+    // until unlock token is presented (see docs/SECURITY_ENFORCEMENT_SPEC.md S8).
+    console.error(
+      "[deckagent] profile_locked=true — policy edits via Control UI should be rejected",
+    );
   }
 
   if (!existsSync(DECK_DIR)) {
@@ -211,7 +233,21 @@ async function main(): Promise<void> {
   });
 
   const localServer = new LocalTunnelServer(executor, logger);
-  const client = new TunnelClient(config, executor, logger);
+  const client = new TunnelClient(config, executor, logger, {
+    getCaps: () => {
+      const p = executor.getPolicy();
+      const profile =
+        typeof (p as { profile?: unknown }).profile === "string"
+          ? (p as { profile: string }).profile
+          : undefined;
+      return {
+        tools: getEnabledTools(p),
+        capabilities: getCapabilityFlags(p),
+        read_only: p.read_only,
+        profile,
+      };
+    },
+  });
 
   const controlUi = new ControlUiServer({
     logger,
@@ -233,6 +269,8 @@ async function main(): Promise<void> {
     },
     getPolicy: () => executor.getPolicy(),
     setPolicy: (next) => {
+      // Normalize on every Control UI update (read_only forces terminal/browser off).
+      // TODO(Agent C): reject with PROFILE_LOCKED when profile_locked and no unlock header.
       const applied = applyRuntimePolicy(next, enableBrowserFlag);
       executor.updatePolicy(applied);
       try {
@@ -240,6 +278,8 @@ async function main(): Promise<void> {
       } catch {
         // ignore
       }
+      // S2: push updated enabled tools to Worker for tools/list filtering.
+      client.refreshCaps();
     },
   });
 

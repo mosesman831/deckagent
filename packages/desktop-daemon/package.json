@@ -5,6 +5,12 @@
   "type": "module",
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",
+  "exports": {
+    ".": "./dist/src/index.js",
+    "./package.json": "./package.json",
+    "./policy-lock": "./dist/src/policy-lock.js",
+    "./policy-lock.js": "./dist/src/policy-lock.js"
+  },
   "bin": {
     "deckagent-daemon": "dist/src/index.js"
   },
@@ -14,7 +20,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/src/index.js",
-    "test": "npm run build && node dist/test.js",
+    "test": "npm run build && node dist/test.js && node dist/policy-lock.test.js",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

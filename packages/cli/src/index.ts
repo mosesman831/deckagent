@@ -19,6 +19,7 @@ import { runDoctor } from './doctor.js';
 import { runTunnel } from './tunnel.js';
 import { runWorkspaceCommand } from './workspace.js';
 import { runSecretCommand } from './secrets.js';
+import { runPolicyCommand } from './policy-cmd.js';
 import { openControlUi } from './ui.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -49,6 +50,11 @@ Usage:
   deckagent secret set <NAME>  Store a secret (prompt or stdin)
   deckagent secret list        List secret names
   deckagent secret delete <NAME>  Delete a secret
+  deckagent policy show        Show effective policy
+  deckagent policy set-profile <strict|dev|locked>  Apply security profile
+  deckagent policy trust <path>   Add trusted directory
+  deckagent policy deny <path>    Add denied directory
+  deckagent policy lock|unlock    Lock policy / create UI unlock token
   deckagent ui                 Open local control UI (http://127.0.0.1:9150)
   deckagent doctor             Check DeckAgent health and prerequisites
   deckagent uninstall          Stop daemon and remove config
@@ -153,6 +159,11 @@ async function main(): Promise<void> {
 
     case 'secret': {
       await runSecretCommand(args.slice(1));
+      break;
+    }
+
+    case 'policy': {
+      await runPolicyCommand(args.slice(1));
       break;
     }
 

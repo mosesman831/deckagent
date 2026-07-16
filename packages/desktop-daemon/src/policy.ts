@@ -2,20 +2,64 @@ import { z } from "zod";
 import { homedir } from "node:os";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname, join, resolve as resolvePath, isAbsolute, normalize, sep } from "node:path";
+import { normalizePolicy as applyNormalizePolicy, describeNormalizationFixes } from "./security-profiles.js";
+import {
+  evaluatePathAccess,
+  findSandboxBinary,
+  type PathOp,
+} from "./path-security.js";
+import {
+  toolDisabledReason,
+  isWritePathTool,
+  TERMINAL_TOOLS as CAP_TERMINAL_TOOLS,
+  BROWSER_TOOLS as CAP_BROWSER_TOOLS,
+  ALL_KNOWN_TOOLS,
+} from "./capabilities.js";
 
 /**
- * Policy defaults (blocklist mode for backward compatibility):
+ * Policy defaults (blocklist mode for backward compatibility / profile=dev):
  * - command_mode: "blocklist" | "allowlist" (default "blocklist")
  * - blocked_commands: used when command_mode is "blocklist"
  * - allowed_commands: used when command_mode is "allowlist"
- *   (substring or word-boundary match; empty list blocks all terminal commands)
+ * - terminal_mode: off | allowlist | blocklist | sandbox_fs
+ * - trusted_directories: if empty, falls back to allowed_directories (migration)
  *
- * CLI `deckagent configure` may set command_mode/allowed_commands later;
- * daemon defaults stay blocklist for compatibility.
+ * On every readPolicy(), normalizePolicy() applies profile + read_only hard forces.
  */
 export const PolicySchema = z.object({
-  version: z.number().int().default(1),
+  version: z.number().int().default(2),
+  /** Security profile — defaults applied via normalizePolicy. Setup will use strict later. */
+  profile: z.enum(["strict", "dev", "locked"]).default("dev"),
+  /** When true, Control UI / remote policy edits must be rejected (Agent C lock UI). */
+  profile_locked: z.boolean().default(false),
   allowed_directories: z.array(z.string()).default(["~"]),
+  /**
+   * Trusted roots (S3). If empty, evaluator falls back to allowed_directories.
+   */
+  trusted_directories: z.array(z.string()).default([]),
+  /** Optional separate read roots (S10). If unset, trusted_directories applies. */
+  trusted_read_directories: z.array(z.string()).optional(),
+  /** Optional separate write roots (S10). If unset, trusted_directories applies. */
+  trusted_write_directories: z.array(z.string()).optional(),
+  /** Hard deny prefixes (S3). */
+  denied_directories: z.array(z.string()).default([]),
+  /** User-supplied protected path globs/prefixes (S3), merged with builtins. */
+  protected_paths: z.array(z.string()).default([]),
+  /**
+   * deny_all: protected paths block read+write (strict default).
+   * deny_write: only mutate/write blocked (dev default).
+   */
+  protected_path_policy: z.enum(["deny_all", "deny_write"]).default("deny_write"),
+  path_rules: z
+    .object({
+      symlink_mode: z
+        .enum(["deny_escape", "deny_symlinks", "follow"])
+        .default("deny_escape"),
+      allow_dotdot: z.boolean().default(false),
+    })
+    .default({}),
+  /** Dangerous: disables hardcoded ~/.ssh, .env, etc. protections. */
+  disable_builtin_protections: z.boolean().default(false),
   blocked_commands: z.array(z.string()).default([
     "rm -rf",
     "sudo",
@@ -37,6 +81,15 @@ export const PolicySchema = z.object({
   command_mode: z.enum(["blocklist", "allowlist"]).default("blocklist"),
   /** Substrings or single-token patterns; used when command_mode is "allowlist". */
   allowed_commands: z.array(z.string()).default([]),
+  /**
+   * Terminal containment (S6).
+   * off → same as !allow_terminal
+   * allowlist / blocklist → command_mode logic
+   * sandbox_fs → require bwrap/sandbox-exec or deny TERMINAL_SANDBOX_UNAVAILABLE
+   */
+  terminal_mode: z
+    .enum(["off", "allowlist", "blocklist", "sandbox_fs"])
+    .default("blocklist"),
   require_confirmation: z.array(z.string()).default([
     "execute_command",
     "write_file",
@@ -45,6 +98,11 @@ export const PolicySchema = z.object({
     "restore_snapshot",
   ]),
   read_only: z.boolean().default(false),
+  /**
+   * fs_read: only fs_read tools + get_environment (+ list_snapshots)
+   * meta_only: only get_environment
+   */
+  read_only_mode: z.enum(["fs_read", "meta_only"]).default("fs_read"),
   allow_browser: z.boolean().default(false),
   allow_terminal: z.boolean().default(true),
   allow_computer_use: z.boolean().default(false),
@@ -52,6 +110,13 @@ export const PolicySchema = z.object({
   allow_secret_injection: z.boolean().default(true),
   max_file_read_size: z.number().int().positive().default(10 * 1024 * 1024),
   max_command_timeout: z.number().int().positive().default(300),
+  network: z
+    .object({
+      allow_browser_hosts: z.array(z.string()).default([]),
+      deny_browser_hosts: z.array(z.string()).default([]),
+      block_shell_net_tools: z.boolean().default(false),
+    })
+    .default({}),
   budgets: z
     .object({
       max_tool_calls_per_hour: z.number().int().positive().default(300),
@@ -67,7 +132,7 @@ export type Policy = z.infer<typeof PolicySchema>;
 export interface PolicyResult {
   allowed: boolean;
   reason?: string;
-  /** Soft error code for tunnel (e.g. ACCESS_DENIED, POLICY_BLOCKED). */
+  /** Soft error code for tunnel (e.g. ACCESS_DENIED, POLICY_BLOCKED, READ_ONLY). */
   code?: string;
   requiresConfirmation?: boolean;
   confirmationReason?: string;
@@ -80,30 +145,8 @@ export interface WorkspacePolicy {
   allow_outside_with_confirmation: boolean;
 }
 
-const MUTATING_TOOLS = new Set([
-  "write_file",
-  "edit_file",
-  "create_directory",
-  "move_file",
-  "kill_process",
-  "execute_command",
-  "execute_command_stream",
-  "restore_snapshot",
-]);
-
-const TERMINAL_TOOLS = new Set([
-  "execute_command",
-  "execute_command_stream",
-  "list_processes",
-  "kill_process",
-]);
-
-const BROWSER_TOOLS = new Set([
-  "browser_navigate",
-  "browser_screenshot",
-  "browser_click",
-  "browser_evaluate",
-]);
+const TERMINAL_TOOLS = new Set<string>(CAP_TERMINAL_TOOLS);
+const BROWSER_TOOLS = new Set<string>(CAP_BROWSER_TOOLS);
 
 /** Tools that omit path in schemas default to home (~). */
 const PATH_DEFAULTS: Record<string, Record<string, string>> = {
@@ -134,12 +177,28 @@ const DANGEROUS_COMMAND_PATTERNS: RegExp[] = [
   /\bchmod\s+(-[a-zA-Z]*\s+)?777\s+\/(\s|$)/,
 ];
 
+/** Shell network tools blocked when network.block_shell_net_tools is true (S7). */
+const SHELL_NET_TOOLS_PATTERN =
+  /\b(curl|wget|nc|ncat|fetch|httpie|ssh|scp|rsync)\b/;
+
 export function getPolicyPath(): string {
   return join(homedir(), ".deckagent", "policy.json");
 }
 
 export function createDefaultPolicy(): Policy {
-  return PolicySchema.parse({});
+  return normalizePolicy({});
+}
+
+/**
+ * Normalize raw or partial policy JSON into an effective Policy.
+ * Parses via PolicySchema then applies profile + read_only hard forces.
+ */
+export function normalizePolicy(raw: unknown): Policy {
+  const result = PolicySchema.safeParse(raw ?? {});
+  if (!result.success) {
+    throw new Error(`Invalid policy: ${result.error.message}`);
+  }
+  return applyNormalizePolicy(result.data);
 }
 
 export function readPolicy(path = getPolicyPath()): Policy {
@@ -168,7 +227,16 @@ export function readPolicy(path = getPolicyPath()): Policy {
     throw new Error(`Invalid policy: ${result.error.message}`);
   }
 
-  return result.data;
+  const before = result.data;
+  const normalized = applyNormalizePolicy(before);
+  const fixes = describeNormalizationFixes(before, normalized);
+  if (fixes.length > 0) {
+    // Warn on stderr so operators see contradictory JSON was re-forced.
+    process.stderr.write(
+      `[deckagent] policy normalization: ${fixes.join("; ")}\n`,
+    );
+  }
+  return normalized;
 }
 
 export function writePolicy(policy: Policy, path = getPolicyPath()): void {
@@ -177,7 +245,8 @@ export function writePolicy(policy: Policy, path = getPolicyPath()): void {
     mkdirSync(dir, { recursive: true });
   }
 
-  const result = PolicySchema.safeParse(policy);
+  const normalized = normalizePolicy(policy);
+  const result = PolicySchema.safeParse(normalized);
   if (!result.success) {
     throw new Error(`Cannot write invalid policy: ${result.error.message}`);
   }
@@ -188,6 +257,16 @@ export function writePolicy(policy: Policy, path = getPolicyPath()): void {
     throw new Error(`Failed to write policy file: ${path} (${humanError(err)})`);
   }
 }
+
+// Re-export profile helpers + capability / path APIs
+export { applyProfileDefaults, describeNormalizationFixes } from "./security-profiles.js";
+export {
+  getEnabledTools,
+  getCapabilities,
+  getCapabilityFlags,
+  isToolEnabled,
+} from "./capabilities.js";
+export { evaluatePathAccess } from "./path-security.js";
 
 /** Collapse whitespace and lowercase for command matching. */
 export function normalizeCommand(command: string): string {
@@ -212,8 +291,6 @@ export function isCommandBlocked(
     return { blocked: false };
   }
 
-  // Strip common obfuscation: zero-width / control chars already gone via normalize;
-  // also collapse "$()" wrappers lightly by checking raw patterns on normalized form.
   for (const pattern of DANGEROUS_COMMAND_PATTERNS) {
     if (pattern.test(normalized)) {
       return { blocked: true, matched: pattern.source };
@@ -398,46 +475,41 @@ export function checkToolAllowed(
   policy: Policy,
   workspace?: WorkspacePolicy | null,
 ): PolicyResult {
-  const allTools = new Set([
-    "read_file",
-    "write_file",
-    "edit_file",
-    "search_files",
-    "list_directory",
-    "create_directory",
-    "move_file",
-    "get_file_info",
-    "read_multiple_files",
-    "execute_command",
-    "execute_command_stream",
-    "list_processes",
-    "kill_process",
-    "browser_navigate",
-    "browser_screenshot",
-    "browser_click",
-    "browser_evaluate",
-    "get_environment",
-    "list_snapshots",
-    "restore_snapshot",
-  ]);
+  // Fail closed: always evaluate against normalized effective policy
+  const effective = normalizePolicy(policy);
+
+  const allTools = new Set<string>(ALL_KNOWN_TOOLS);
 
   if (!allTools.has(toolName)) {
-    return { allowed: false, reason: `Unknown tool: ${toolName}` };
-  }
-
-  if (policy.read_only && MUTATING_TOOLS.has(toolName)) {
     return {
       allowed: false,
-      reason: `Tool '${toolName}' is blocked because policy is read-only`,
+      code: "TOOL_DISABLED",
+      reason: `Unknown tool: ${toolName}`,
     };
   }
 
-  if (!policy.allow_terminal && TERMINAL_TOOLS.has(toolName)) {
-    return { allowed: false, reason: `Terminal tools are disabled by policy` };
+  // S2 capability gate (includes read_only v2)
+  const disabled = toolDisabledReason(toolName, effective);
+  if (disabled) {
+    return {
+      allowed: false,
+      code: disabled.code,
+      reason: disabled.reason,
+    };
   }
 
-  if (!policy.allow_browser && BROWSER_TOOLS.has(toolName)) {
-    return { allowed: false, reason: `Browser tools are disabled by policy` };
+  // S6 terminal_mode off (belt + suspenders with capabilities)
+  if (
+    TERMINAL_TOOLS.has(toolName) &&
+    (effective.terminal_mode === "off" || !effective.allow_terminal)
+  ) {
+    return {
+      allowed: false,
+      code: effective.read_only ? "READ_ONLY" : "TOOL_DISABLED",
+      reason: effective.read_only
+        ? `[READ_ONLY] Tool '${toolName}' is blocked because policy is read-only`
+        : `[TOOL_DISABLED] Terminal capability is disabled`,
+    };
   }
 
   const argsWithDefaults = applyPathDefaults(toolName, args);
@@ -450,14 +522,44 @@ export function checkToolAllowed(
   const command =
     typeof resolvedArgs.command === "string" ? resolvedArgs.command : "";
   if (command && TERMINAL_TOOLS.has(toolName)) {
-    const commandCheck = checkCommandPolicy(command, policy);
+    const commandCheck = checkCommandPolicy(command, effective);
     if (!commandCheck.allowed) {
       return commandCheck;
     }
   }
 
-  // Effective allowlist = policy.allowed_directories (workspace typically inside).
-  const pathResult = checkPathAllowed(toolName, resolvedArgs, policy);
+  // S7 browser URL host checks
+  if (toolName === "browser_navigate" || toolName === "browser_evaluate") {
+    const url =
+      typeof resolvedArgs.url === "string"
+        ? resolvedArgs.url
+        : typeof resolvedArgs.expression === "string"
+          ? extractUrlFromExpression(resolvedArgs.expression)
+          : null;
+    if (url) {
+      const netCheck = checkBrowserUrlAllowed(url, effective);
+      if (!netCheck.allowed) {
+        return netCheck;
+      }
+    } else if (
+      toolName === "browser_navigate" &&
+      effective.profile === "strict"
+    ) {
+      // Strict requires a URL we can validate
+      const allow = effective.network?.allow_browser_hosts ?? [];
+      if (allow.length === 0 || !resolvedArgs.url) {
+        return {
+          allowed: false,
+          code: "NETWORK_DENIED",
+          reason:
+            "[NETWORK_DENIED] browser_navigate requires an allowed URL host under strict profile",
+        };
+      }
+    }
+  }
+
+  // Path engine (S3/S5/S9/S10)
+  const pathResult = checkPathAllowed(toolName, resolvedArgs, effective);
   if (!pathResult.allowed) {
     return pathResult;
   }
@@ -476,7 +578,7 @@ export function checkToolAllowed(
     };
   }
 
-  if (policy.require_confirmation.includes(toolName)) {
+  if (effective.require_confirmation.includes(toolName)) {
     const reason = command
       ? `Tool '${toolName}' with command '${command}' requires confirmation`
       : `Tool '${toolName}' requires confirmation`;
@@ -540,16 +642,76 @@ export function checkWorkspaceBoundary(
 }
 
 /**
- * Apply command_mode (blocklist vs allowlist) to a terminal command string.
+ * Apply terminal_mode + command_mode + network.block_shell_net_tools.
  */
 export function checkCommandPolicy(
   command: string,
   policy: Policy,
 ): PolicyResult {
-  if (policy.command_mode === "allowlist") {
-    if (policy.allowed_commands.length === 0) {
+  const effective = normalizePolicy(policy);
+  const mode = effective.terminal_mode ?? "blocklist";
+
+  if (mode === "off" || !effective.allow_terminal) {
+    return {
+      allowed: false,
+      code: effective.read_only ? "READ_ONLY" : "TOOL_DISABLED",
+      reason: `[TOOL_DISABLED] Terminal capability is disabled`,
+    };
+  }
+
+  if (mode === "sandbox_fs") {
+    if (!findSandboxBinary()) {
       return {
         allowed: false,
+        code: "TERMINAL_SANDBOX_UNAVAILABLE",
+        reason:
+          "[TERMINAL_SANDBOX_UNAVAILABLE] terminal_mode=sandbox_fs requires bwrap or sandbox-exec (fail closed)",
+      };
+    }
+    // MVP: once sandbox binary exists, still apply allowlist-style command filter
+  }
+
+  // Effective command filter mode
+  const commandMode =
+    mode === "allowlist" || mode === "sandbox_fs"
+      ? "allowlist"
+      : effective.command_mode === "allowlist"
+        ? "allowlist"
+        : "blocklist";
+
+  // When terminal_mode is allowlist, force allowlist filtering even if command_mode says blocklist
+  const useAllowlist =
+    mode === "allowlist" ||
+    mode === "sandbox_fs" ||
+    effective.command_mode === "allowlist" ||
+    commandMode === "allowlist";
+
+  // S7 block shell net tools (unless explicitly allowlisted by name)
+  if (effective.network?.block_shell_net_tools) {
+    const normalized = normalizeCommand(command);
+    const netMatch = normalized.match(SHELL_NET_TOOLS_PATTERN);
+    if (netMatch) {
+      const toolName = netMatch[1]!;
+      const explicitlyAllowed =
+        useAllowlist &&
+        effective.allowed_commands.some(
+          (e) => normalizeCommand(e) === toolName,
+        );
+      if (!explicitlyAllowed) {
+        return {
+          allowed: false,
+          code: "NETWORK_DENIED",
+          reason: `[NETWORK_DENIED] Shell network tool '${toolName}' is blocked by network.block_shell_net_tools`,
+        };
+      }
+    }
+  }
+
+  if (useAllowlist) {
+    if (effective.allowed_commands.length === 0) {
+      return {
+        allowed: false,
+        code: "POLICY_BLOCKED",
         reason:
           "Command blocked by policy: command_mode is allowlist but allowed_commands is empty (all terminal commands blocked)",
       };
@@ -559,13 +721,15 @@ export function checkCommandPolicy(
     if (dangerous.blocked) {
       return {
         allowed: false,
+        code: "POLICY_BLOCKED",
         reason: `Command blocked by policy: matched dangerous pattern '${dangerous.matched ?? "dangerous pattern"}'`,
       };
     }
-    const allowResult = isCommandAllowed(command, policy.allowed_commands);
+    const allowResult = isCommandAllowed(command, effective.allowed_commands);
     if (!allowResult.allowed) {
       return {
         allowed: false,
+        code: "POLICY_BLOCKED",
         reason:
           "Command blocked by policy: command_mode is allowlist and command does not match any allowed_commands entry",
       };
@@ -574,14 +738,90 @@ export function checkCommandPolicy(
   }
 
   // blocklist (default)
-  const blockResult = isCommandBlocked(command, policy.blocked_commands);
+  const blockResult = isCommandBlocked(command, effective.blocked_commands);
   if (blockResult.blocked) {
     return {
       allowed: false,
+      code: "POLICY_BLOCKED",
       reason: `Command blocked by policy: matched '${blockResult.matched ?? "dangerous pattern"}'`,
     };
   }
   return { allowed: true };
+}
+
+/**
+ * S7: Check browser URL against network allow/deny host lists.
+ * Strict: empty allow_browser_hosts → deny all navigations.
+ * Dev: empty allow list → allow all (subject to deny list).
+ */
+export function checkBrowserUrlAllowed(
+  urlString: string,
+  policy: Policy,
+): PolicyResult {
+  const effective = normalizePolicy(policy);
+  let host: string;
+  try {
+    const u = new URL(urlString);
+    host = u.hostname.toLowerCase();
+  } catch {
+    return {
+      allowed: false,
+      code: "NETWORK_DENIED",
+      reason: `[NETWORK_DENIED] Invalid URL '${urlString}'`,
+    };
+  }
+
+  const allow = effective.network?.allow_browser_hosts ?? [];
+  const deny = effective.network?.deny_browser_hosts ?? [];
+
+  for (const pattern of deny) {
+    if (hostMatches(host, pattern)) {
+      return {
+        allowed: false,
+        code: "NETWORK_DENIED",
+        reason: `[NETWORK_DENIED] Host '${host}' is denied by network.deny_browser_hosts`,
+      };
+    }
+  }
+
+  if (allow.length > 0) {
+    const ok = allow.some((pattern) => hostMatches(host, pattern));
+    if (!ok) {
+      return {
+        allowed: false,
+        code: "NETWORK_DENIED",
+        reason: `[NETWORK_DENIED] Host '${host}' is not allowed`,
+      };
+    }
+    return { allowed: true };
+  }
+
+  // Empty allow list
+  if (effective.profile === "strict") {
+    return {
+      allowed: false,
+      code: "NETWORK_DENIED",
+      reason: `[NETWORK_DENIED] Host '${host}' is not allowed (strict profile requires allow_browser_hosts)`,
+    };
+  }
+
+  return { allowed: true };
+}
+
+function hostMatches(host: string, pattern: string): boolean {
+  const p = pattern.trim().toLowerCase();
+  if (!p) return false;
+  if (p === "*") return true;
+  if (p.startsWith("*.")) {
+    const suffix = p.slice(1); // .example.com
+    return host.endsWith(suffix) || host === p.slice(2);
+  }
+  return host === p;
+}
+
+function extractUrlFromExpression(expression: string): string | null {
+  const m = expression.match(/https?:\/\/[^\s'"`]+/i);
+  return m ? m[0]! : null;
 }
 
 function checkPathAllowed(
@@ -589,17 +829,23 @@ function checkPathAllowed(
   args: Record<string, unknown>,
   policy: Policy,
 ): PolicyResult {
-  void toolName;
+  const op: PathOp = isWritePathTool(toolName) ? "write" : "read";
   const pathKeys = ["path", "source", "destination", "workdir"];
 
   for (const key of pathKeys) {
     const value = args[key];
     if (typeof value !== "string" || !value) continue;
 
-    if (!isPathAllowed(value, policy)) {
+    // move_file: both source and destination checked as write (mutating)
+    const keyOp: PathOp =
+      toolName === "move_file" ? "write" : key === "workdir" ? "read" : op;
+
+    const result = evaluatePathAccess(value, keyOp, policy);
+    if (!result.allowed) {
       return {
         allowed: false,
-        reason: `Path '${value}' is outside allowed directories`,
+        code: result.code,
+        reason: result.reason,
       };
     }
   }
@@ -607,10 +853,12 @@ function checkPathAllowed(
   if (Array.isArray(args.paths)) {
     for (const p of args.paths) {
       if (typeof p !== "string") continue;
-      if (!isPathAllowed(p, policy)) {
+      const result = evaluatePathAccess(p, op, policy);
+      if (!result.allowed) {
         return {
           allowed: false,
-          reason: `Path '${p}' is outside allowed directories`,
+          code: result.code,
+          reason: result.reason,
         };
       }
     }
@@ -619,35 +867,13 @@ function checkPathAllowed(
   return { allowed: true };
 }
 
+/**
+ * Legacy helper: true if path is inside trusted roots (read op, no protected deny for deny_write reads).
+ */
 export function isPathAllowed(inputPath: string, policy: Policy): boolean {
-  const resolved = resolvePathWithHome(inputPath);
-  let realPath: string;
-
-  try {
-    realPath = realpathSync(resolved);
-  } catch {
-    realPath = resolved;
-  }
-
-  const normalizedTarget = normalizePathForCompare(realPath);
-  if (!isAbsolute(normalizedTarget) && !isAbsolute(realPath)) {
-    return false;
-  }
-
-  const allowedDirs = policy.allowed_directories.map((d) =>
-    normalizePathForCompare(resolvePathWithHome(d)),
-  );
-
-  for (const allowed of allowedDirs) {
-    if (pathsEqual(normalizedTarget, allowed)) {
-      return true;
-    }
-    if (isPathInside(normalizedTarget, allowed)) {
-      return true;
-    }
-  }
-
-  return false;
+  const effective = normalizePolicy(policy);
+  const result = evaluatePathAccess(inputPath, "read", effective);
+  return result.allowed;
 }
 
 function resolvePathWithHome(inputPath: string): string {
@@ -664,7 +890,6 @@ function resolvePathWithHome(inputPath: string): string {
 /** Normalize separators and casing for cross-platform prefix checks. */
 function normalizePathForCompare(inputPath: string): string {
   let normalized = normalize(inputPath);
-  // Unify separators to platform sep after normalize (handles mixed / and \)
   if (sep === "\\") {
     normalized = normalized.replace(/\//g, "\\");
   } else {
@@ -673,7 +898,6 @@ function normalizePathForCompare(inputPath: string): string {
   if (process.platform === "win32") {
     normalized = normalized.toLowerCase();
   }
-  // Strip trailing separator (except root)
   if (normalized.length > 1 && normalized.endsWith(sep)) {
     normalized = normalized.slice(0, -1);
   }

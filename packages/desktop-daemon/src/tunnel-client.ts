@@ -19,6 +19,21 @@ interface ReadResourceMessage {
   args?: Record<string, unknown>;
 }
 
+/** Payload sent as tunnel `policy_caps` for Worker tools/list filtering. */
+export type PolicyCapsPayload = {
+  tools: string[];
+  capabilities?: {
+    fs_read?: boolean;
+    fs_write?: boolean;
+    terminal?: boolean;
+    browser?: boolean;
+    meta?: boolean;
+    [key: string]: boolean | undefined;
+  };
+  read_only?: boolean;
+  profile?: string;
+};
+
 export type ConnectionState =
   | "stopped"
   | "connecting"
@@ -35,6 +50,7 @@ export class TunnelClient {
   private config: Config;
   private executor: ToolExecutor;
   private logger: Logger;
+  private getCaps: (() => PolicyCapsPayload) | null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private heartbeatTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -47,14 +63,29 @@ export class TunnelClient {
   private state: ConnectionState = "stopped";
   private bufferedData = "";
 
-  constructor(config: Config, executor: ToolExecutor, logger: Logger) {
+  constructor(
+    config: Config,
+    executor: ToolExecutor,
+    logger: Logger,
+    options?: { getCaps?: () => PolicyCapsPayload },
+  ) {
     this.config = config;
     this.executor = executor;
     this.logger = logger;
+    this.getCaps = options?.getCaps ?? null;
   }
 
   getState(): ConnectionState {
     return this.state;
+  }
+
+  /**
+   * Re-send policy_caps to the Worker (e.g. after Control UI policy POST).
+   * No-op when not connected or getCaps was not provided.
+   */
+  refreshCaps(): void {
+    if (this.state !== "connected") return;
+    this.sendPolicyCaps();
   }
 
   connect(): void {
@@ -207,6 +238,35 @@ export class TunnelClient {
     this.pendingAuth?.resolve();
     this.pendingAuth = null;
     this.startHeartbeat();
+    // S2: publish enabled tools so Worker can filter tools/list.
+    this.sendPolicyCaps();
+  }
+
+  private sendPolicyCaps(): void {
+    if (!this.getCaps) return;
+    let caps: PolicyCapsPayload;
+    try {
+      caps = this.getCaps();
+    } catch (err) {
+      this.logger.warn(
+        `Failed to collect policy caps: ${humanError(err)}`,
+      );
+      return;
+    }
+    if (!Array.isArray(caps.tools)) {
+      this.logger.warn("policy_caps getCaps() returned invalid tools array");
+      return;
+    }
+    this.send({
+      type: "policy_caps",
+      tools: caps.tools,
+      capabilities: caps.capabilities,
+      read_only: caps.read_only,
+      profile: caps.profile,
+    });
+    this.logger.debug(
+      `Sent policy_caps (${caps.tools.length} tools, read_only=${String(caps.read_only)})`,
+    );
   }
 
   private handleAuthError(msg: Record<string, unknown>): void {

@@ -20,7 +20,7 @@ import {
   WORKER_VERSION,
 } from "./protocol.js";
 
-export { TOOL_CATALOG as tools } from "./tool-catalog.js";
+export { TOOL_CATALOG as tools, filterToolCatalog } from "./tool-catalog.js";
 export { PROMPT_CATALOG, MCP_INSTRUCTIONS } from "./prompt-catalog.js";
 export { RESOURCE_CATALOG } from "./resource-catalog.js";
 
@@ -100,8 +100,66 @@ function deckCodeToHttp(deckCode: string): number {
 }
 
 /**
+ * Prefer the connected daemon's filtered catalog (via TunnelDO).
+ * When no daemon is online, fall back to the full TOOL_CATALOG.
+ */
+async function resolveToolsList(
+  env: Env,
+  cors: Record<string, string>,
+  id: JsonRpcId,
+  requestedDeviceId?: string
+): Promise<Response> {
+  const resolved = await resolveTargetDeviceId(env, requestedDeviceId);
+  if ("error" in resolved) {
+    if (resolved.error === "DEVICE_OFFLINE") {
+      return jsonRpcResponse(id, { tools: TOOL_CATALOG }, cors);
+    }
+    // Ambiguous multi-device: still return full catalog so clients can connect;
+    // tools/call will require deviceId.
+    if (resolved.error === "DEVICE_AMBIGUOUS") {
+      return jsonRpcResponse(id, { tools: TOOL_CATALOG }, cors);
+    }
+    return jsonRpcError(id, resolved.error, resolved.message, {
+      rpcCode: deckCodeToRpc(resolved.error),
+      httpStatus: deckCodeToHttp(resolved.error),
+      cors,
+    });
+  }
+
+  const doId = env.TUNNEL_DO.idFromName(resolved.deviceId);
+  const stub = env.TUNNEL_DO.get(doId);
+  const forwardBody = JSON.stringify({
+    jsonrpc: "2.0",
+    id,
+    method: "tools/list",
+    params: { deviceId: resolved.deviceId },
+  });
+
+  try {
+    const doResponse = await stub.fetch(
+      new Request("https://tunnel-do/mcp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: forwardBody,
+      })
+    );
+    const headers = new Headers(doResponse.headers);
+    for (const [k, v] of Object.entries(cors)) {
+      headers.set(k, v);
+    }
+    return new Response(doResponse.body, {
+      status: doResponse.status,
+      headers,
+    });
+  } catch {
+    return jsonRpcResponse(id, { tools: TOOL_CATALOG }, cors);
+  }
+}
+
+/**
  * Handle MCP Streamable HTTP at the Worker edge.
- * initialize / tools/list are local; tools/call is routed to the device's DO.
+ * initialize is local; tools/list is filtered via TunnelDO when a daemon is online;
+ * tools/call is routed to the device's DO.
  */
 export async function handleMcpRequest(
   request: Request,
@@ -109,7 +167,7 @@ export async function handleMcpRequest(
   cors: Record<string, string>
 ): Promise<Response> {
   if (request.method === "GET") {
-    return jsonRpcResponse("0", { tools: TOOL_CATALOG }, cors);
+    return resolveToolsList(env, cors, "0");
   }
 
   if (request.method !== "POST") {
@@ -172,7 +230,7 @@ export async function handleMcpRequest(
   }
 
   if (method === "tools/list") {
-    return jsonRpcResponse(id, { tools: TOOL_CATALOG }, cors);
+    return resolveToolsList(env, cors, id, body.params?.deviceId);
   }
 
   if (method === "prompts/list") {

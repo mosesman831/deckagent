@@ -11,9 +11,9 @@ import {
   listRegisteredDeviceIds,
 } from "./src/device-registry.js";
 import { verifyApiToken } from "./src/auth.js";
-import { TOOL_CATALOG, TOOL_NAMES } from "./src/tool-catalog.js";
+import { TOOL_CATALOG, TOOL_NAMES, filterToolCatalog } from "./src/tool-catalog.js";
 import { tools as mcpHandlerTools } from "./src/mcp-handler.js";
-import { formatSseEvent } from "./src/tunnel-do.js";
+import { formatSseEvent, TunnelDO } from "./src/tunnel-do.js";
 import {
   RESOURCE_CATALOG,
   isKnownResourceUri,
@@ -101,6 +101,10 @@ class FakeKV {
 class FakeDurableObjectNamespace {
   /** Last Accept header seen on a stub.fetch (for SSE forwarding tests). */
   lastAccept: string | null = null;
+  /**
+   * S2: simulated daemon policy_caps. `null` = full catalog (pre-caps).
+   */
+  enabledTools: Set<string> | null = null;
 
   idFromName(name: string): { name: string } {
     return { name };
@@ -111,11 +115,28 @@ class FakeDurableObjectNamespace {
     return {
       fetch: async (request: Request) => {
         this.lastAccept = request.headers.get("Accept");
-        let body: { method?: string; params?: { name?: string } } = {};
+        let body: {
+          method?: string;
+          id?: string | number | null;
+          params?: { name?: string };
+        } = {};
         try {
           body = (await request.clone().json()) as typeof body;
         } catch {
           /* ignore */
+        }
+
+        // S2: tools/list filtered by enabledTools (null → full catalog).
+        if (body.method === "tools/list") {
+          const tools = filterToolCatalog(this.enabledTools);
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: body.id ?? null,
+              result: { tools },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
         }
 
         // Light SSE mock: execute_command_stream + Accept event-stream.
@@ -341,8 +362,120 @@ async function main() {
   assert(
     Array.isArray(toolsBody.result?.tools) &&
       toolsBody.result!.tools!.length === 20,
-    "tools/list returns 20 tools"
+    "tools/list returns 20 tools (no daemon → full catalog)"
   );
+
+  // --- 5a. S2 tools/list filtering ---
+  console.log("\n5a. S2 tools/list filtering (policy_caps)");
+  {
+    const full = filterToolCatalog(null);
+    assert(full.length === 20, "null enabledTools → full catalog");
+    const undef = filterToolCatalog(undefined);
+    assert(undef.length === 20, "undefined enabledTools → full catalog");
+
+    const readOnlySubset = [
+      "read_file",
+      "read_multiple_files",
+      "list_directory",
+      "get_file_info",
+      "search_files",
+      "list_snapshots",
+      "get_environment",
+    ];
+    const filtered = filterToolCatalog(readOnlySubset);
+    assert(
+      filtered.length === readOnlySubset.length,
+      `filter shrinks to ${readOnlySubset.length} (got ${filtered.length})`
+    );
+    assert(
+      filtered.every((t) => readOnlySubset.includes(t.name)),
+      "filtered tools only from enabled set"
+    );
+    assert(
+      !filtered.some((t) => t.name === "write_file"),
+      "write_file hidden when not enabled"
+    );
+    assert(
+      !filtered.some((t) => t.name === "execute_command"),
+      "execute_command hidden when not enabled"
+    );
+    assert(
+      filtered.some((t) => t.name === "get_environment"),
+      "get_environment remains"
+    );
+
+    const asSet = filterToolCatalog(new Set(["get_environment", "read_file"]));
+    assert(asSet.length === 2, "Set input filters to 2 tools");
+
+    // TunnelDO: mock policy_caps then tools/list shrinks.
+    const doInst = new TunnelDO(
+      {} as DurableObjectState,
+      env
+    );
+    assert(
+      doInst.getEnabledToolsForTest() === null,
+      "DO starts with null enabledTools"
+    );
+    const before = filterToolCatalog(doInst.getEnabledToolsForTest());
+    assert(before.length === 20, "pre-caps list is full catalog");
+
+    doInst.applyPolicyCapsForTest({ tools: readOnlySubset });
+    const afterCaps = doInst.getEnabledToolsForTest();
+    assert(afterCaps !== null && afterCaps.size === readOnlySubset.length, "caps applied");
+    const afterList = filterToolCatalog(afterCaps);
+    assert(
+      afterList.length < 20 && afterList.length === readOnlySubset.length,
+      "after policy_caps tools/list length shrinks"
+    );
+    assert(
+      !afterList.some((t) =>
+        ["write_file", "edit_file", "execute_command", "restore_snapshot"].includes(
+          t.name
+        )
+      ),
+      "mutating tools absent after read_only-style caps"
+    );
+
+    // Edge path: online device + Fake DO with restricted caps.
+    await updateDeviceStatus(env, deviceId, "online");
+    env._do.enabledTools = new Set(readOnlySubset);
+    const filteredListRes = await worker.fetch(
+      new Request(url("/mcp"), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${API_TOKEN}`,
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 91,
+          method: "tools/list",
+        }),
+      }),
+      env
+    );
+    const filteredListBody = (await filteredListRes.json()) as {
+      result?: { tools?: Array<{ name: string }> };
+    };
+    const listed = filteredListBody.result?.tools ?? [];
+    assert(filteredListRes.status === 200, "filtered tools/list → 200");
+    assert(
+      listed.length === readOnlySubset.length && listed.length < 20,
+      `edge tools/list shrinks (got ${listed.length})`
+    );
+    assert(
+      listed.some((t) => t.name === "get_environment"),
+      "edge list includes get_environment"
+    );
+    assert(
+      !listed.some((t) => t.name === "write_file"),
+      "edge list excludes write_file"
+    );
+
+    // Reset for later tests that expect Fake DO offline behavior.
+    env._do.enabledTools = null;
+    await updateDeviceStatus(env, deviceId, "offline");
+  }
 
   // --- 5b. MCP prompts + instructions ---
   console.log("\n5b. MCP prompts / instructions");

@@ -158,12 +158,19 @@ async function runProfile(
         method: "tools/list",
         params: {},
       });
-      const tools = (json.result as { tools?: unknown[] } | undefined)?.tools;
-      const ok = status === 200 && hasResult(json) && Array.isArray(tools);
+      const tools = (json.result as { tools?: Array<{ name?: string }> } | undefined)
+        ?.tools;
+      const hasEnv =
+        Array.isArray(tools) &&
+        tools.length > 0 &&
+        tools.some((t) => t.name === "get_environment");
+      const ok = status === 200 && hasResult(json) && hasEnv;
       results.push({
         step,
         ok,
-        detail: ok ? `${tools!.length} tools` : `status=${status}`,
+        detail: ok
+          ? `${tools!.length} tools (incl. get_environment)`
+          : `status=${status} count=${tools?.length ?? "n/a"}`,
       });
     } catch (err) {
       results.push({

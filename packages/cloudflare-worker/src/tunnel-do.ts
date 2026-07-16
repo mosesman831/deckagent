@@ -6,9 +6,10 @@ import type {
   AuthOkMessage,
   ReadResourceMessage,
   ResourceResultMessage,
+  PolicyCapsMessage,
 } from "./types.js";
 import { JsonRpcCode } from "./types.js";
-import { TOOL_CATALOG, TOOL_NAMES } from "./tool-catalog.js";
+import { TOOL_NAMES, filterToolCatalog } from "./tool-catalog.js";
 import {
   MCP_INSTRUCTIONS,
   PROMPT_CATALOG,
@@ -102,9 +103,35 @@ export class TunnelDO implements DurableObject {
   private pendingTools = new Map<string, PendingTool>();
   private pendingResources = new Map<string, PendingResource>();
   private env: Env;
+  /**
+   * Daemon-reported enabled tool names (S2).
+   * `null` = no policy_caps yet → advertise full TOOL_CATALOG.
+   */
+  private enabledTools: Set<string> | null = null;
 
   constructor(_ctx: DurableObjectState, env: Env) {
     this.env = env;
+  }
+
+  /** Exposed for unit tests — apply a policy_caps payload. */
+  applyPolicyCapsForTest(msg: Pick<PolicyCapsMessage, "tools">): void {
+    this.applyPolicyCaps(msg);
+  }
+
+  /** Exposed for unit tests — current filter state. */
+  getEnabledToolsForTest(): Set<string> | null {
+    return this.enabledTools;
+  }
+
+  private applyPolicyCaps(msg: Pick<PolicyCapsMessage, "tools">): void {
+    if (!Array.isArray(msg.tools)) return;
+    this.enabledTools = new Set(
+      msg.tools.filter((t): t is string => typeof t === "string")
+    );
+  }
+
+  private listedTools() {
+    return filterToolCatalog(this.enabledTools);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -282,6 +309,10 @@ export class TunnelDO implements DurableObject {
         server.send(JSON.stringify({ type: "heartbeat_ack" }) + "\n");
         break;
       }
+      case "policy_caps": {
+        this.applyPolicyCaps(msg);
+        break;
+      }
       default:
         break;
     }
@@ -304,6 +335,7 @@ export class TunnelDO implements DurableObject {
     this.ws = null;
     this.deviceId = null;
     this.sessionId = null;
+    this.enabledTools = null;
   }
 
   private mergeProgressIntoResult(
@@ -507,7 +539,7 @@ export class TunnelDO implements DurableObject {
 
   private async handleMcpRequest(request: Request): Promise<Response> {
     if (request.method === "GET") {
-      return jsonRpcResponse("0", { tools: TOOL_CATALOG });
+      return jsonRpcResponse("0", { tools: this.listedTools() });
     }
 
     if (request.method !== "POST") {
@@ -559,7 +591,7 @@ export class TunnelDO implements DurableObject {
     }
 
     if (method === "tools/list") {
-      return jsonRpcResponse(id, { tools: TOOL_CATALOG });
+      return jsonRpcResponse(id, { tools: this.listedTools() });
     }
 
     if (method === "prompts/list") {

@@ -267,3 +267,20 @@ export const TOOL_NAMES = new Set(TOOL_CATALOG.map((t) => t.name));
 export function getToolByName(name: string): McpToolDefinition | undefined {
   return TOOL_CATALOG.find((t) => t.name === name);
 }
+
+/**
+ * Filter TOOL_CATALOG to the daemon-enabled set (S2).
+ * `null` / `undefined` → full catalog (backward compat until first policy_caps).
+ */
+export function filterToolCatalog(
+  enabledTools: ReadonlySet<string> | readonly string[] | null | undefined
+): McpToolDefinition[] {
+  if (enabledTools == null) {
+    return TOOL_CATALOG;
+  }
+  const set =
+    enabledTools instanceof Set
+      ? enabledTools
+      : new Set(enabledTools);
+  return TOOL_CATALOG.filter((t) => set.has(t.name));
+}

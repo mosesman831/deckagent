@@ -87,6 +87,25 @@ export interface StateUpdateMessage {
   capabilities?: string[];
 }
 
+/**
+ * Daemon → Worker: enabled tool set for MCP tools/list filtering (S2).
+ * Sent after auth_ok and whenever policy changes (refreshCaps).
+ */
+export interface PolicyCapsMessage {
+  type: "policy_caps";
+  tools: string[];
+  capabilities?: {
+    fs_read?: boolean;
+    fs_write?: boolean;
+    terminal?: boolean;
+    browser?: boolean;
+    meta?: boolean;
+    [key: string]: boolean | undefined;
+  };
+  read_only?: boolean;
+  profile?: string;
+}
+
 /** Worker → daemon: fetch an MCP resource from local state. */
 export interface ReadResourceMessage {
   type: "read_resource";
@@ -127,7 +146,8 @@ export type TunnelMessage =
   | ResourceErrorMessage
   | HeartbeatMessage
   | HeartbeatAckMessage
-  | StateUpdateMessage;
+  | StateUpdateMessage
+  | PolicyCapsMessage;
 
 /** JSON-RPC 2.0 standard / server error codes */
 export const JsonRpcCode = {
