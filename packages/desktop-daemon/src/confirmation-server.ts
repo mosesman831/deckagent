@@ -1,5 +1,5 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import type { Logger } from "./logger.js";
 
@@ -15,6 +15,7 @@ interface PendingApproval {
   tool: string;
   argsSummary: string;
   reason: string;
+  csrfToken: string;
   createdAt: number;
   expiresAt: number;
   decision: ApprovalDecision | null;
@@ -107,6 +108,7 @@ export class ConfirmationServer {
       tool: options.tool,
       argsSummary: summarizeArgs(options.args),
       reason: options.reason,
+      csrfToken: randomBytes(32).toString("hex"),
       createdAt: now,
       expiresAt: now + expireMs,
       decision: null,
@@ -281,8 +283,19 @@ export class ConfirmationServer {
     const url = new URL(req.url || "/", `http://${this.host}:${this.port}`);
     const method = (req.method || "GET").toUpperCase();
 
-    // CORS not needed — localhost only.
     try {
+      if (!requestHasLoopbackProvenance(req)) {
+        sendHtml(
+          res,
+          403,
+          htmlPage(
+            "Forbidden",
+            "<p>DeckAgent confirmation requests are accepted only from loopback pages.</p>",
+          ),
+        );
+        return;
+      }
+
       if (method === "GET" && url.pathname === "/health") {
         sendJson(res, 200, { ok: true });
         return;
@@ -301,13 +314,27 @@ export class ConfirmationServer {
         return;
       }
 
-      if (
-        (method === "POST" || method === "GET") &&
-        actionMatch
-      ) {
+      if (method === "GET" && actionMatch) {
+        sendHtml(
+          res,
+          405,
+          htmlPage(
+            "Use the confirmation form",
+            "<p>Approval decisions must be submitted from the confirmation form.</p>",
+          ),
+        );
+        return;
+      }
+
+      if (method === "POST" && actionMatch) {
         const id = actionMatch[1]!;
         const action = actionMatch[2] as "approve" | "deny";
-        this.handleDecision(res, id, action === "approve" ? "approved" : "denied");
+        await this.handleDecision(
+          req,
+          res,
+          id,
+          action === "approve" ? "approved" : "denied",
+        );
         return;
       }
 
@@ -321,10 +348,11 @@ export class ConfirmationServer {
   }
 
   private handleDecision(
+    req: IncomingMessage,
     res: ServerResponse,
     id: string,
     decision: "approved" | "denied",
-  ): void {
+  ): Promise<void> {
     const approval = this.pending.get(id);
     if (!approval) {
       sendHtml(
@@ -335,7 +363,7 @@ export class ConfirmationServer {
           "<p>This confirmation request expired or does not exist.</p>",
         ),
       );
-      return;
+      return Promise.resolve();
     }
 
     if (approval.decision) {
@@ -347,7 +375,7 @@ export class ConfirmationServer {
           `<p>This request was already <strong>${approval.decision}</strong>.</p>`,
         ),
       );
-      return;
+      return Promise.resolve();
     }
 
     if (Date.now() > approval.expiresAt) {
@@ -357,23 +385,47 @@ export class ConfirmationServer {
         410,
         htmlPage("Expired", "<p>This confirmation request has expired.</p>"),
       );
-      return;
+      return Promise.resolve();
     }
 
-    this.settle(approval, decision);
-    this.logger.info(
-      `Confirmation ${decision} for tool '${approval.tool}' (${id})`,
-    );
+    return readFormBody(req).then((body) => {
+      const csrf = firstHeader(req.headers["x-deckagent-csrf"]) ?? body.get("csrf");
+      if (csrf !== approval.csrfToken) {
+        sendHtml(
+          res,
+          403,
+          htmlPage(
+            "Forbidden",
+            "<p>Invalid or missing confirmation CSRF token. Reopen the confirmation form and try again.</p>",
+          ),
+        );
+        return;
+      }
 
-    sendHtml(
-      res,
-      200,
-      htmlPage(
-        decision === "approved" ? "Approved" : "Denied",
-        `<p>Tool <code>${escapeHtml(approval.tool)}</code> was <strong>${decision}</strong>.</p>
-         <p>You can close this window. The daemon will continue.</p>`,
-      ),
-    );
+      this.settle(approval, decision);
+      this.logger.info(
+        `Confirmation ${decision} for tool '${approval.tool}' (${id})`,
+      );
+
+      sendHtml(
+        res,
+        200,
+        htmlPage(
+          decision === "approved" ? "Approved" : "Denied",
+          `<p>Tool <code>${escapeHtml(approval.tool)}</code> was <strong>${decision}</strong>.</p>
+           <p>You can close this window. The daemon will continue.</p>`,
+        ),
+      );
+    }).catch((err) => {
+      this.logger.warn(
+        `Confirmation form parse failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      sendHtml(
+        res,
+        400,
+        htmlPage("Invalid request", "<p>Could not read confirmation form data.</p>"),
+      );
+    });
   }
 
   private renderConfirmPage(res: ServerResponse, id: string): void {
@@ -432,15 +484,69 @@ export class ConfirmationServer {
           <p class="expires">Expires in ~${remainingSec}s</p>
         </div>
         <form method="POST" action="/confirm/${id}/approve" style="display:inline">
+          <input type="hidden" name="csrf" value="${escapeHtml(approval.csrfToken)}"/>
           <button type="submit" class="btn approve">Approve</button>
         </form>
         <form method="POST" action="/confirm/${id}/deny" style="display:inline;margin-left:12px">
+          <input type="hidden" name="csrf" value="${escapeHtml(approval.csrfToken)}"/>
           <button type="submit" class="btn deny">Deny</button>
         </form>
         `,
       ),
     );
   }
+}
+
+async function readFormBody(req: IncomingMessage): Promise<URLSearchParams> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return new URLSearchParams(Buffer.concat(chunks).toString("utf-8"));
+}
+
+function requestHasLoopbackProvenance(req: IncomingMessage): boolean {
+  const host = firstHeader(req.headers.host);
+  if (!host || !isLoopbackAuthority(host)) return false;
+
+  const origin = firstHeader(req.headers.origin);
+  if (origin && !isLoopbackUrl(origin)) return false;
+
+  const referer = firstHeader(req.headers.referer);
+  if (referer && !isLoopbackUrl(referer)) return false;
+
+  return true;
+}
+
+function firstHeader(
+  value: string | string[] | undefined,
+): string | undefined {
+  if (Array.isArray(value)) return value[0];
+  return value;
+}
+
+function isLoopbackUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return isLoopbackHostname(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function isLoopbackAuthority(value: string): boolean {
+  const raw = value.trim();
+  if (!raw) return false;
+  try {
+    return isLoopbackHostname(new URL(`http://${raw}`).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const h = hostname.trim().toLowerCase();
+  return h === "localhost" || h === "127.0.0.1" || h === "::1";
 }
 
 function summarizeArgs(args: Record<string, unknown>): string {

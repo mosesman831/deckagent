@@ -4,6 +4,10 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import type { Logger } from "./logger.js";
 import type { ConfirmationServer } from "./confirmation-server.js";
 import type { Policy } from "./policy.js";
@@ -17,6 +21,9 @@ import {
 
 export const CONTROL_UI_HOST = "127.0.0.1";
 export const CONTROL_UI_PORT = 9150;
+export const CONTROL_UI_TOKEN_FILE = "ui.token";
+export const CONTROL_UI_TOKEN_COOKIE = "deckagent_ui";
+export const CONTROL_UI_TOKEN_HEADER = "x-deckagent-ui-token";
 
 export interface ControlUiStatus {
   worker_url: string;
@@ -40,6 +47,8 @@ export interface ControlUiOptions {
   auditLogDir?: string;
   /** Override ~/.deckagent for unlock.token (tests). */
   unlockTokenDir?: string;
+  /** Override ~/.deckagent for ui.token (tests). */
+  uiTokenDir?: string;
 }
 
 /**
@@ -57,6 +66,8 @@ export class ControlUiServer {
   private port: number;
   private auditLogDir?: string;
   private unlockTokenDir?: string;
+  private uiTokenDir?: string;
+  private uiToken: string | null = null;
 
   constructor(options: ControlUiOptions) {
     this.logger = options.logger;
@@ -68,6 +79,7 @@ export class ControlUiServer {
     this.port = options.port ?? CONTROL_UI_PORT;
     this.auditLogDir = options.auditLogDir;
     this.unlockTokenDir = options.unlockTokenDir;
+    this.uiTokenDir = options.uiTokenDir;
   }
 
   get baseUrl(): string {
@@ -83,6 +95,8 @@ export class ControlUiServer {
         `Control UI must bind to loopback only (got host '${this.host}')`,
       );
     }
+
+    this.uiToken = ensureControlUiToken(this.uiTokenDir);
 
     await new Promise<void>((resolve, reject) => {
       const server = createServer((req, res) => {
@@ -130,7 +144,8 @@ export class ControlUiServer {
 
     try {
       if (method === "GET" && url.pathname === "/") {
-        sendHtml(res, 200, renderDashboard());
+        const headers = this.consumeBootstrapToken(url);
+        sendHtml(res, 200, renderDashboard(), headers);
         return;
       }
 
@@ -152,6 +167,7 @@ export class ControlUiServer {
       );
 
       if (method === "POST" && approveMatch) {
+        if (!this.authorizeMutation(req, res)) return;
         const id = approveMatch[1]!;
         const ok = this.confirmationServer.approve(id);
         sendJson(res, ok ? 200 : 404, {
@@ -163,6 +179,7 @@ export class ControlUiServer {
       }
 
       if (method === "POST" && denyMatch) {
+        if (!this.authorizeMutation(req, res)) return;
         const id = denyMatch[1]!;
         const ok = this.confirmationServer.deny(id);
         sendJson(res, ok ? 200 : 404, {
@@ -200,6 +217,7 @@ export class ControlUiServer {
       }
 
       if (method === "POST" && url.pathname === "/api/policy/unlock") {
+        if (!this.authorizeMutation(req, res)) return;
         const body = await readJsonBody(req);
         const token = extractUnlockToken({
           headerValue: req.headers[UNLOCK_HEADER],
@@ -224,6 +242,7 @@ export class ControlUiServer {
       }
 
       if (method === "POST" && url.pathname === "/api/policy") {
+        if (!this.authorizeMutation(req, res)) return;
         const body = await readJsonBody(req);
         const current = this.getPolicy();
         if (current.profile_locked) {
@@ -259,6 +278,86 @@ export class ControlUiServer {
       });
     }
   }
+
+  private consumeBootstrapToken(url: URL): Record<string, string> | undefined {
+    const token = this.uiToken;
+    if (!token) return undefined;
+    if (!tokensMatch(url.searchParams.get("token"), token)) {
+      return undefined;
+    }
+    return {
+      "Set-Cookie": `${CONTROL_UI_TOKEN_COOKIE}=${token}; HttpOnly; SameSite=Strict; Path=/`,
+    };
+  }
+
+  private authorizeMutation(req: IncomingMessage, res: ServerResponse): boolean {
+    if (!this.postOriginAllowed(req)) {
+      sendJson(res, 403, {
+        error: "Forbidden: Control UI POSTs must come from the loopback UI origin",
+        code: "CSRF_ORIGIN_DENIED",
+      });
+      return false;
+    }
+
+    const token = this.uiToken;
+    if (!token) {
+      sendJson(res, 500, {
+        error: "Control UI token is not initialized",
+        code: "UI_TOKEN_UNAVAILABLE",
+      });
+      return false;
+    }
+
+    const headerToken = firstHeader(req.headers[CONTROL_UI_TOKEN_HEADER]);
+    const cookieToken = parseCookie(req.headers.cookie)[CONTROL_UI_TOKEN_COOKIE];
+    if (tokensMatch(headerToken, token) || tokensMatch(cookieToken, token)) {
+      return true;
+    }
+
+    sendJson(res, 401, {
+      error: "Unauthorized: missing or invalid Control UI token",
+      code: "UI_TOKEN_REQUIRED",
+    });
+    return false;
+  }
+
+  private postOriginAllowed(req: IncomingMessage): boolean {
+    const origin = firstHeader(req.headers.origin);
+    if (!origin) return true;
+    try {
+      const url = new URL(origin);
+      if (url.protocol !== "http:") return false;
+      if (!isLoopbackHost(url.hostname)) return false;
+      const port = url.port || "80";
+      return port === String(this.port);
+    } catch {
+      return false;
+    }
+  }
+}
+
+export function getControlUiTokenPath(baseDir?: string): string {
+  return join(baseDir ?? join(homedir(), ".deckagent"), CONTROL_UI_TOKEN_FILE);
+}
+
+export function ensureControlUiToken(baseDir?: string): string {
+  const tokenPath = getControlUiTokenPath(baseDir);
+  mkdirSync(dirname(tokenPath), { recursive: true });
+
+  try {
+    const existing = readFileSync(tokenPath, "utf-8").trim();
+    if (/^[0-9a-fA-F]{64,}$/.test(existing)) {
+      chmodBestEffort(tokenPath);
+      return existing;
+    }
+  } catch {
+    // Missing or unreadable token; write a fresh local UI token.
+  }
+
+  const token = randomBytes(32).toString("hex");
+  writeFileSync(tokenPath, `${token}\n`, { mode: 0o600 });
+  chmodBestEffort(tokenPath);
+  return token;
 }
 
 function policySubset(policy: Policy): Record<string, unknown> {
@@ -311,6 +410,45 @@ function isLoopbackAddress(addr: string): boolean {
   return false;
 }
 
+function firstHeader(
+  value: string | string[] | undefined,
+): string | undefined {
+  if (Array.isArray(value)) return value[0];
+  return value;
+}
+
+function parseCookie(value: string | string[] | undefined): Record<string, string> {
+  const header = firstHeader(value);
+  const out: Record<string, string> = {};
+  if (!header) return out;
+  for (const part of header.split(";")) {
+    const [rawName, ...rawValue] = part.trim().split("=");
+    if (!rawName) continue;
+    try {
+      out[rawName] = decodeURIComponent(rawValue.join("="));
+    } catch {
+      out[rawName] = rawValue.join("=");
+    }
+  }
+  return out;
+}
+
+function tokensMatch(candidate: string | null | undefined, expected: string): boolean {
+  if (!candidate) return false;
+  const candidateBuffer = Buffer.from(candidate);
+  const expectedBuffer = Buffer.from(expected);
+  if (candidateBuffer.length !== expectedBuffer.length) return false;
+  return timingSafeEqual(candidateBuffer, expectedBuffer);
+}
+
+function chmodBestEffort(path: string): void {
+  try {
+    chmodSync(path, 0o600);
+  } catch {
+    // Some platforms/filesystems do not support POSIX modes.
+  }
+}
+
 async function readJsonBody(
   req: IncomingMessage,
 ): Promise<Record<string, unknown>> {
@@ -344,12 +482,18 @@ function sendJson(res: ServerResponse, status: number, data: unknown): void {
   res.end(body);
 }
 
-function sendHtml(res: ServerResponse, status: number, html: string): void {
+function sendHtml(
+  res: ServerResponse,
+  status: number,
+  html: string,
+  headers?: Record<string, string>,
+): void {
   const body = Buffer.from(html, "utf-8");
   res.writeHead(status, {
     "Content-Type": "text/html; charset=utf-8",
     "Content-Length": body.length,
     "Cache-Control": "no-store",
+    ...(headers ?? {}),
   });
   res.end(body);
 }

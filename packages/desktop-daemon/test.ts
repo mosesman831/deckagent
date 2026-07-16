@@ -102,6 +102,13 @@ function section(title: string): void {
   console.log(`\n== ${title} ==`);
 }
 
+function extractHiddenField(html: string, name: string): string | null {
+  const pattern = new RegExp(
+    `<input[^>]+name=["']${name}["'][^>]+value=["']([^"']+)["']`,
+  );
+  return pattern.exec(html)?.[1] ?? null;
+}
+
 function testBlockedCommands(): void {
   section("isCommandBlocked");
 
@@ -553,10 +560,22 @@ async function testConfirmationFlow(): Promise<void> {
     const html = await page.text();
     assert(html.includes("kill_process"), "confirm page shows tool name");
     assert(html.includes("Arguments") || html.includes("args"), "confirm page shows args section");
+    const csrf = extractHiddenField(html, "csrf");
+    assert(typeof csrf === "string" && csrf.length >= 64, "confirm page includes CSRF token");
+
+    const getApprove = await fetch(`http://127.0.0.1:19148/confirm/${third.id}/approve`);
+    assertEqual(getApprove.status, 405, "GET approve → 405");
+
+    const missingCsrf = await fetch(`http://127.0.0.1:19148/confirm/${third.id}/approve`, {
+      method: "POST",
+    });
+    assertEqual(missingCsrf.status, 403, "POST approve without CSRF → 403");
 
     const httpWait = server.waitForDecision(third.id, 5_000);
     const res = await fetch(`http://127.0.0.1:19148/confirm/${third.id}/approve`, {
       method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf: csrf ?? "" }),
     });
     assert(res.ok, "HTTP approve returns ok");
     assertEqual(await httpWait, "approved", "HTTP approve settles waiter");
@@ -1001,6 +1020,7 @@ async function testControlUi(): Promise<void> {
   const logger = new Logger("error", false);
   const confirmation = new ConfirmationServer(logger, { port: 19150 });
   await confirmation.start();
+  const uiTokenDir = mkdtempSync(join(tmpdir(), "deckagent-ui-token-"));
 
   let policy = createDefaultPolicy();
   const control = new ControlUiServer({
@@ -1021,6 +1041,7 @@ async function testControlUi(): Promise<void> {
     setPolicy: (p) => {
       policy = p;
     },
+    uiTokenDir,
   });
 
   try {
@@ -1054,6 +1075,13 @@ async function testControlUi(): Promise<void> {
     assert(threw, "non-loopback host throws");
 
     await control.start();
+    const uiTokenPath = join(uiTokenDir, "ui.token");
+    assert(existsSync(uiTokenPath), "ui.token created on control UI start");
+    const uiToken = readFileSync(uiTokenPath, "utf-8").trim();
+    assert(/^[0-9a-f]{64,}$/.test(uiToken), "ui.token is 32+ bytes hex");
+    if (process.platform !== "win32") {
+      assertEqual(statSync(uiTokenPath).mode & 0o777, 0o600, "ui.token mode 0600");
+    }
 
     const statusRes = await fetch("http://127.0.0.1:19151/api/status");
     assert(statusRes.ok, "GET /api/status ok");
@@ -1080,25 +1108,63 @@ async function testControlUi(): Promise<void> {
     assertEqual(approvals.pending.length, 1, "api approvals lists 1");
     assertEqual(approvals.pending[0]!.id, id, "approval id matches");
 
-    const wait = confirmation.waitForDecision(id, 5_000);
-    const approveRes = await fetch(
+    const noTokenRes = await fetch(
       `http://127.0.0.1:19151/api/approvals/${id}/approve`,
       { method: "POST" },
     );
-    assert(approveRes.ok, "approve endpoint ok");
+    assertEqual(noTokenRes.status, 401, "control UI POST without token → 401");
+
+    const wait = confirmation.waitForDecision(id, 5_000);
+    const approveRes = await fetch(
+      `http://127.0.0.1:19151/api/approvals/${id}/approve`,
+      {
+        method: "POST",
+        headers: {
+          "X-DeckAgent-UI-Token": uiToken,
+          Origin: "http://127.0.0.1:19151",
+        },
+      },
+    );
+    assert(approveRes.ok, "approve endpoint with valid token ok");
     assertEqual(await wait, "approved", "UI approve settles waiter");
     assertEqual(confirmation.listPending().length, 0, "listPending empty after approve");
 
-    const homePage = await fetch("http://127.0.0.1:19151/");
+    const homePage = await fetch(`http://127.0.0.1:19151/?token=${uiToken}`);
     assert(homePage.ok, "GET / dashboard ok");
+    const cookie = homePage.headers.get("set-cookie") ?? "";
+    assert(cookie.includes("deckagent_ui="), "bootstrap token sets UI cookie");
+    assert(cookie.includes("HttpOnly"), "UI cookie is HttpOnly");
+    assert(cookie.includes("SameSite=Strict"), "UI cookie is SameSite=Strict");
     const html = await homePage.text();
     assert(html.includes("DeckAgent"), "dashboard shows DeckAgent");
+
+    const cookieApproval = confirmation.createApproval({
+      tool: "execute_command",
+      args: { command: "echo cookie" },
+      reason: "cookie auth test",
+    });
+    const cookieWait = confirmation.waitForDecision(cookieApproval.id, 5_000);
+    const cookieApprove = await fetch(
+      `http://127.0.0.1:19151/api/approvals/${cookieApproval.id}/approve`,
+      {
+        method: "POST",
+        headers: {
+          Cookie: cookie.split(";")[0] ?? "",
+          Origin: "http://127.0.0.1:19151",
+        },
+      },
+    );
+    assert(cookieApprove.ok, "valid UI cookie authorizes mutation");
+    assertEqual(await cookieWait, "approved", "cookie approve settles waiter");
 
     // Wave 4 S8 — profile_locked returns 403 without unlock token
     policy = { ...policy, profile_locked: true };
     const lockedRes = await fetch("http://127.0.0.1:19151/api/policy", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-DeckAgent-UI-Token": uiToken,
+      },
       body: JSON.stringify({ read_only: true }),
     });
     assertEqual(lockedRes.status, 403, "locked POST → 403");
@@ -1107,6 +1173,7 @@ async function testControlUi(): Promise<void> {
   } finally {
     await control.stop();
     await confirmation.stop();
+    rmSync(uiTokenDir, { recursive: true, force: true });
   }
 }
 
