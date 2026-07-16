@@ -31,6 +31,11 @@ const HealthFileSchema = z.object({
   last_heartbeat_at: z.string().datetime(),
   worker_url: z.string().url(),
   version: z.string().min(1),
+  connected_at: z.string().datetime().nullable().optional(),
+  last_disconnect_at: z.string().datetime().nullable().optional(),
+  last_disconnect_reason: z.string().nullable().optional(),
+  reconnect_attempt: z.number().int().nonnegative().optional(),
+  next_reconnect_at: z.string().datetime().nullable().optional(),
   worker_version: z.string().min(1).optional(),
   protocol_warning: z.string().min(1).optional()
 });
@@ -198,7 +203,16 @@ function readHealthFile(
     `tunnel=${result.data.tunnel}`,
     `ok=${String(result.data.ok)}`,
     `heartbeat=${ageSeconds.toFixed(1)}s ago`,
-    `pid=${result.data.pid}`
+    `pid=${result.data.pid}`,
+    ...(result.data.reconnect_attempt
+      ? [`reconnect_attempt=${result.data.reconnect_attempt}`]
+      : []),
+    ...(result.data.next_reconnect_at
+      ? [`next_reconnect_at=${result.data.next_reconnect_at}`]
+      : []),
+    ...(result.data.last_disconnect_reason
+      ? [`last_disconnect=${result.data.last_disconnect_reason}`]
+      : [])
   ].join(', ');
 
   return {

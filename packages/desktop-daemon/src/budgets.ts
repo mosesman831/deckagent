@@ -8,6 +8,7 @@ import {
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import type { Policy } from "./policy.js";
+import { appendErrorHint } from "./error-hints.js";
 
 const WINDOW_MS = 60 * 60 * 1000;
 
@@ -146,7 +147,10 @@ export function checkBudget(
       ok: false,
       code: "BUDGET_EXCEEDED",
       budget: "max_tool_calls_per_hour",
-      message: `Budget exceeded: max_tool_calls_per_hour (${budgets.max_tool_calls_per_hour}) reached. Try again after ${oldestResetIso(state.tool_calls, now)}.`,
+      message: appendErrorHint(
+        `Budget exceeded: max_tool_calls_per_hour (${budgets.max_tool_calls_per_hour}) reached. Try again after ${oldestResetIso(state.tool_calls, now)}.`,
+        "BUDGET_EXCEEDED",
+      ),
       resets_at: oldestResetIso(state.tool_calls, now),
     };
   }
@@ -157,10 +161,13 @@ export function checkBudget(
       ok: false,
       code: "BUDGET_EXCEEDED",
       budget: "max_shell_seconds_per_hour",
-      message: `Budget exceeded: max_shell_seconds_per_hour (${budgets.max_shell_seconds_per_hour}) reached. Try again after ${oldestResetIso(
-        state.shell_seconds.map((e) => e.ts),
-        now,
-      )}.`,
+      message: appendErrorHint(
+        `Budget exceeded: max_shell_seconds_per_hour (${budgets.max_shell_seconds_per_hour}) reached. Try again after ${oldestResetIso(
+          state.shell_seconds.map((e) => e.ts),
+          now,
+        )}.`,
+        "BUDGET_EXCEEDED",
+      ),
       resets_at: oldestResetIso(
         state.shell_seconds.map((e) => e.ts),
         now,
@@ -174,10 +181,13 @@ export function checkBudget(
       ok: false,
       code: "BUDGET_EXCEEDED",
       budget: "max_bytes_written_per_hour",
-      message: `Budget exceeded: max_bytes_written_per_hour (${budgets.max_bytes_written_per_hour}) reached. Try again after ${oldestResetIso(
-        state.bytes_written.map((e) => e.ts),
-        now,
-      )}.`,
+      message: appendErrorHint(
+        `Budget exceeded: max_bytes_written_per_hour (${budgets.max_bytes_written_per_hour}) reached. Try again after ${oldestResetIso(
+          state.bytes_written.map((e) => e.ts),
+          now,
+        )}.`,
+        "BUDGET_EXCEEDED",
+      ),
       resets_at: oldestResetIso(
         state.bytes_written.map((e) => e.ts),
         now,
@@ -193,7 +203,10 @@ export function checkBudget(
       ok: false,
       code: "BUDGET_EXCEEDED",
       budget: "max_confirmations_per_hour",
-      message: `Budget exceeded: max_confirmations_per_hour (${budgets.max_confirmations_per_hour}) reached. Try again after ${oldestResetIso(state.confirmations, now)}.`,
+      message: appendErrorHint(
+        `Budget exceeded: max_confirmations_per_hour (${budgets.max_confirmations_per_hour}) reached. Try again after ${oldestResetIso(state.confirmations, now)}.`,
+        "BUDGET_EXCEEDED",
+      ),
       resets_at: oldestResetIso(state.confirmations, now),
     };
   }

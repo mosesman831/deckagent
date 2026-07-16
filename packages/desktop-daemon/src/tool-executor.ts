@@ -61,6 +61,7 @@ import {
   recordToolDeniedByCode,
   recordToolOk,
 } from "./metrics.js";
+import { appendErrorHint } from "./error-hints.js";
 
 export interface ToolResultPayload {
   content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
@@ -323,7 +324,10 @@ export class ToolExecutor {
         outcome = {
           ok: false,
           code: policyResult.code ?? "POLICY_BLOCKED",
-          message: policyResult.reason || "Blocked by policy",
+          message: appendErrorHint(
+            policyResult.reason || "Blocked by policy",
+            policyResult.code,
+          ),
         };
         return outcome;
       }
@@ -347,7 +351,10 @@ export class ToolExecutor {
         outcome = {
           ok: false,
           code: budgetCheck.code ?? "BUDGET_EXCEEDED",
-          message: budgetCheck.message || "Budget exceeded",
+          message: appendErrorHint(
+            budgetCheck.message || "Budget exceeded",
+            budgetCheck.code,
+          ),
         };
         return outcome;
       }

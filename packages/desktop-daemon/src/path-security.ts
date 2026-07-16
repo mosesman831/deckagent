@@ -18,6 +18,7 @@ import {
   sep,
 } from "node:path";
 import type { Policy } from "./policy.js";
+import { appendErrorHint } from "./error-hints.js";
 import {
   matchBuiltinProtection,
   matchUserProtectedPath,
@@ -149,7 +150,10 @@ function canonicalizePath(
       return {
         allowed: false,
         code: "PATH_DENIED",
-        reason: `[PATH_DENIED] Symlinks are not allowed (symlink_mode=deny_symlinks) for '${inputPath}'`,
+        reason: appendErrorHint(
+          `[PATH_DENIED] Symlinks are not allowed (symlink_mode=deny_symlinks) for '${inputPath}'`,
+          "PATH_DENIED",
+        ),
       };
     }
     return { ok: true, canonical: absolute };
@@ -247,7 +251,7 @@ export function evaluatePathAccess(
     return {
       allowed: false,
       code: "PATH_DENIED",
-      reason: "[PATH_DENIED] Empty path",
+      reason: appendErrorHint("[PATH_DENIED] Empty path", "PATH_DENIED"),
     };
   }
 
@@ -256,7 +260,7 @@ export function evaluatePathAccess(
     return {
       allowed: false,
       code: "PATH_DENIED",
-      reason: `[PATH_DENIED] ${unsafe}`,
+      reason: appendErrorHint(`[PATH_DENIED] ${unsafe}`, "PATH_DENIED"),
     };
   }
 
@@ -268,7 +272,10 @@ export function evaluatePathAccess(
       return {
         allowed: false,
         code: "PATH_DENIED",
-        reason: `[PATH_DENIED] Path '${inputPath}' contains '..' (allow_dotdot=false)`,
+        reason: appendErrorHint(
+          `[PATH_DENIED] Path '${inputPath}' contains '..' (allow_dotdot=false)`,
+          "PATH_DENIED",
+        ),
       };
     }
   }
@@ -289,7 +296,10 @@ export function evaluatePathAccess(
     return {
       allowed: false,
       code: "PATH_UNTRUSTED",
-      reason: "[PATH_UNTRUSTED] No trusted directories configured",
+      reason: appendErrorHint(
+        "[PATH_UNTRUSTED] No trusted directories configured",
+        "PATH_UNTRUSTED",
+      ),
       canonical,
     };
   }
@@ -299,7 +309,10 @@ export function evaluatePathAccess(
     return {
       allowed: false,
       code: "PATH_UNTRUSTED",
-      reason: `[PATH_UNTRUSTED] Path '${inputPath}' resolves outside trusted directories`,
+      reason: appendErrorHint(
+        `[PATH_UNTRUSTED] Path '${inputPath}' resolves outside trusted directories`,
+        "PATH_UNTRUSTED",
+      ),
       canonical,
     };
   }
@@ -309,7 +322,10 @@ export function evaluatePathAccess(
     return {
       allowed: false,
       code: "PATH_DENIED",
-      reason: `[PATH_DENIED] Path '${inputPath}' is inside denied directory '${deniedHit}'`,
+      reason: appendErrorHint(
+        `[PATH_DENIED] Path '${inputPath}' is inside denied directory '${deniedHit}'`,
+        "PATH_DENIED",
+      ),
       canonical,
     };
   }
@@ -319,7 +335,10 @@ export function evaluatePathAccess(
     return {
       allowed: false,
       code: "PATH_PROTECTED",
-      reason: `[PATH_PROTECTED] Refusing ${op} access to protected path '${inputPath}' (matched '${prot.pattern}')`,
+      reason: appendErrorHint(
+        `[PATH_PROTECTED] Refusing ${op} access to protected path '${inputPath}' (matched '${prot.pattern}')`,
+        "PATH_PROTECTED",
+      ),
       canonical,
     };
   }

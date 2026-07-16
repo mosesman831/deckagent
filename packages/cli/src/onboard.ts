@@ -29,7 +29,12 @@ const HealthFileSchema = z.object({
   tunnel: z.enum(['connected', 'connecting', 'disconnected']),
   last_heartbeat_at: z.string().datetime(),
   worker_url: z.string().url(),
-  version: z.string().min(1)
+  version: z.string().min(1),
+  connected_at: z.string().datetime().nullable().optional(),
+  last_disconnect_at: z.string().datetime().nullable().optional(),
+  last_disconnect_reason: z.string().nullable().optional(),
+  reconnect_attempt: z.number().int().nonnegative().optional(),
+  next_reconnect_at: z.string().datetime().nullable().optional()
 }).passthrough();
 
 const JsonRpcInitializeResponseSchema = z.object({
@@ -289,7 +294,16 @@ function checkDaemon(paths: OnboardReport['paths'], config: Config | null, nowMs
     `health_pid=${health.pid}`,
     `tunnel=${health.tunnel}`,
     `ok=${String(health.ok)}`,
-    `heartbeat=${ageSeconds.toFixed(1)}s ago`
+    `heartbeat=${ageSeconds.toFixed(1)}s ago`,
+    ...(health.reconnect_attempt
+      ? [`reconnect_attempt=${health.reconnect_attempt}`]
+      : []),
+    ...(health.next_reconnect_at
+      ? [`next_reconnect_at=${health.next_reconnect_at}`]
+      : []),
+    ...(health.last_disconnect_reason
+      ? [`last_disconnect=${health.last_disconnect_reason}`]
+      : [])
   ].join(', ');
 
   return check(

@@ -17,6 +17,7 @@ import {
   BROWSER_TOOLS as CAP_BROWSER_TOOLS,
   ALL_KNOWN_TOOLS,
 } from "./capabilities.js";
+import { appendErrorHint } from "./error-hints.js";
 
 /**
  * Policy defaults (blocklist mode for backward compatibility / profile=dev):
@@ -523,15 +524,17 @@ export function checkToolAllowed(
       return {
         allowed: false,
         code: "TOOL_DISABLED",
-        reason:
+        reason: appendErrorHint(
           `[TOOL_DISABLED] Plugin tools are disabled by policy ` +
-          `(allow_plugins=false); restart after enabling plugins`,
+            `(allow_plugins=false); restart after enabling plugins`,
+          "TOOL_DISABLED",
+        ),
       };
     }
     return {
       allowed: false,
       code: "TOOL_DISABLED",
-      reason: `Unknown tool: ${toolName}`,
+      reason: appendErrorHint(`Unknown tool: ${toolName}`, "TOOL_DISABLED"),
     };
   }
 
@@ -540,9 +543,11 @@ export function checkToolAllowed(
       return {
         allowed: false,
         code: "TOOL_DISABLED",
-        reason:
+        reason: appendErrorHint(
           `[TOOL_DISABLED] Plugin tool '${toolName}' is blocked because ` +
-          "policy allow_plugins=false",
+            "policy allow_plugins=false",
+          "TOOL_DISABLED",
+        ),
       };
     }
     if (effective.require_confirmation.includes(toolName)) {
@@ -575,7 +580,10 @@ export function checkToolAllowed(
       code: effective.read_only ? "READ_ONLY" : "TOOL_DISABLED",
       reason: effective.read_only
         ? `[READ_ONLY] Tool '${toolName}' is blocked because policy is read-only`
-        : `[TOOL_DISABLED] Terminal capability is disabled`,
+        : appendErrorHint(
+            "[TOOL_DISABLED] Terminal capability is disabled",
+            "TOOL_DISABLED",
+          ),
     };
   }
 
@@ -629,8 +637,10 @@ export function checkToolAllowed(
         return {
           allowed: false,
           code: "NETWORK_DENIED",
-          reason:
+          reason: appendErrorHint(
             "[NETWORK_DENIED] browser_navigate requires an allowed URL host under strict profile",
+            "NETWORK_DENIED",
+          ),
         };
       }
     }
@@ -736,7 +746,12 @@ export function checkCommandPolicy(
     return {
       allowed: false,
       code: effective.read_only ? "READ_ONLY" : "TOOL_DISABLED",
-      reason: `[TOOL_DISABLED] Terminal capability is disabled`,
+      reason: effective.read_only
+        ? "[TOOL_DISABLED] Terminal capability is disabled"
+        : appendErrorHint(
+            "[TOOL_DISABLED] Terminal capability is disabled",
+            "TOOL_DISABLED",
+          ),
     };
   }
 
@@ -777,7 +792,10 @@ export function checkCommandPolicy(
         return {
           allowed: false,
           code: "NETWORK_DENIED",
-          reason: `[NETWORK_DENIED] Shell network tool '${toolName}' is blocked by network.block_shell_net_tools`,
+          reason: appendErrorHint(
+            `[NETWORK_DENIED] Shell network tool '${toolName}' is blocked by network.block_shell_net_tools`,
+            "NETWORK_DENIED",
+          ),
         };
       }
     }
@@ -844,8 +862,10 @@ function getSandboxExecutionContext(policy: Policy): PolicyResult {
     return {
       allowed: false,
       code: "TERMINAL_SANDBOX_UNAVAILABLE",
-      reason:
+      reason: appendErrorHint(
         "[TERMINAL_SANDBOX_UNAVAILABLE] terminal_mode=sandbox_fs requires bwrap or sandbox-exec (fail closed)",
+        "TERMINAL_SANDBOX_UNAVAILABLE",
+      ),
     };
   }
 
@@ -887,7 +907,10 @@ export function checkBrowserUrlAllowed(
     return {
       allowed: false,
       code: "NETWORK_DENIED",
-      reason: `[NETWORK_DENIED] Invalid URL '${urlString}'`,
+      reason: appendErrorHint(
+        `[NETWORK_DENIED] Invalid URL '${urlString}'`,
+        "NETWORK_DENIED",
+      ),
     };
   }
 
@@ -899,7 +922,10 @@ export function checkBrowserUrlAllowed(
       return {
         allowed: false,
         code: "NETWORK_DENIED",
-        reason: `[NETWORK_DENIED] Host '${host}' is denied by network.deny_browser_hosts`,
+        reason: appendErrorHint(
+          `[NETWORK_DENIED] Host '${host}' is denied by network.deny_browser_hosts`,
+          "NETWORK_DENIED",
+        ),
       };
     }
   }
@@ -910,7 +936,10 @@ export function checkBrowserUrlAllowed(
       return {
         allowed: false,
         code: "NETWORK_DENIED",
-        reason: `[NETWORK_DENIED] Host '${host}' is not allowed`,
+        reason: appendErrorHint(
+          `[NETWORK_DENIED] Host '${host}' is not allowed`,
+          "NETWORK_DENIED",
+        ),
       };
     }
     return { allowed: true };
@@ -921,7 +950,10 @@ export function checkBrowserUrlAllowed(
     return {
       allowed: false,
       code: "NETWORK_DENIED",
-      reason: `[NETWORK_DENIED] Host '${host}' is not allowed (strict profile requires allow_browser_hosts)`,
+      reason: appendErrorHint(
+        `[NETWORK_DENIED] Host '${host}' is not allowed (strict profile requires allow_browser_hosts)`,
+        "NETWORK_DENIED",
+      ),
     };
   }
 

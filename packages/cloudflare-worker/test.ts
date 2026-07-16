@@ -1294,12 +1294,17 @@ async function main() {
     env
   );
   const policyOfflineBody = (await policyOfflineRes.json()) as {
-    error?: { data?: { code?: string } };
+    error?: { message?: string; data?: { code?: string; hint?: string } };
   };
   assert(
     policyOfflineRes.status === 503 &&
       policyOfflineBody.error?.data?.code === "DEVICE_OFFLINE",
     "policy read with no daemon → DEVICE_OFFLINE"
+  );
+  assert(
+    policyOfflineBody.error?.data?.hint === "Run: deckagent daemon --foreground" &&
+      policyOfflineBody.error?.message?.includes("deckagent daemon --foreground"),
+    "DEVICE_OFFLINE JSON-RPC error includes actionable hint"
   );
 
   assert(

@@ -20,6 +20,7 @@ import {
   MIN_PROTOCOL_VERSION,
   WORKER_VERSION,
 } from "./protocol.js";
+import { appendErrorHint, getErrorHint } from "./error-hints.js";
 
 export { TOOL_CATALOG as tools, filterToolCatalog } from "./tool-catalog.js";
 export { PROMPT_CATALOG, MCP_INSTRUCTIONS } from "./prompt-catalog.js";
@@ -51,14 +52,15 @@ function jsonRpcError(
   const rpcCode = options.rpcCode ?? JsonRpcCode.SERVER_ERROR;
   const httpStatus = options.httpStatus ?? 500;
   const cors = options.cors ?? {};
+  const hint = getErrorHint(deckCode);
   return new Response(
     JSON.stringify({
       jsonrpc: "2.0",
       id,
       error: {
         code: rpcCode,
-        message,
-        data: { code: deckCode },
+        message: appendErrorHint(message, deckCode),
+        data: { code: deckCode, ...(hint ? { hint } : {}) },
       },
     }),
     { status: httpStatus, headers: { "Content-Type": "application/json", ...cors } }

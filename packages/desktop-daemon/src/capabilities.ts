@@ -3,6 +3,7 @@
  * Used by checkToolAllowed, tools/list projection, and policy_caps.
  */
 import type { Policy } from "./policy.js";
+import { appendErrorHint } from "./error-hints.js";
 
 /** Names must stay in sync with packages/cloudflare-worker TOOL_CATALOG. */
 export const ALL_KNOWN_TOOLS: readonly string[] = [
@@ -163,7 +164,10 @@ export function toolDisabledReason(
       ? null
       : {
           code: "TOOL_DISABLED",
-          reason: `[TOOL_DISABLED] Tool '${toolName}' is not enabled by current policy`,
+          reason: appendErrorHint(
+            `[TOOL_DISABLED] Tool '${toolName}' is not enabled by current policy`,
+            "TOOL_DISABLED",
+          ),
         };
   }
 
@@ -189,7 +193,10 @@ export function toolDisabledReason(
         code: policy.read_only ? "READ_ONLY" : "TOOL_DISABLED",
         reason: policy.read_only
           ? `[READ_ONLY] Tool '${toolName}' is blocked because policy is read-only`
-          : `[TOOL_DISABLED] Tool '${toolName}' is not enabled by current policy`,
+          : appendErrorHint(
+              `[TOOL_DISABLED] Tool '${toolName}' is not enabled by current policy`,
+              "TOOL_DISABLED",
+            ),
       };
     }
     return null;
@@ -201,7 +208,10 @@ export function toolDisabledReason(
         code: policy.read_only ? "READ_ONLY" : "TOOL_DISABLED",
         reason: policy.read_only
           ? `[READ_ONLY] Tool '${toolName}' is blocked because policy is read-only`
-          : `[TOOL_DISABLED] Terminal capability is disabled`,
+          : appendErrorHint(
+              "[TOOL_DISABLED] Terminal capability is disabled",
+              "TOOL_DISABLED",
+            ),
       };
     }
     return null;
@@ -213,7 +223,10 @@ export function toolDisabledReason(
         code: policy.read_only ? "READ_ONLY" : "TOOL_DISABLED",
         reason: policy.read_only
           ? `[READ_ONLY] Tool '${toolName}' is blocked because policy is read-only`
-          : `[TOOL_DISABLED] Browser tools are disabled by policy`,
+          : appendErrorHint(
+              "[TOOL_DISABLED] Browser tools are disabled by policy",
+              "TOOL_DISABLED",
+            ),
       };
     }
     return null;
@@ -221,6 +234,9 @@ export function toolDisabledReason(
 
   return {
     code: "TOOL_DISABLED",
-    reason: `[TOOL_DISABLED] Unknown or disabled tool '${toolName}'`,
+    reason: appendErrorHint(
+      `[TOOL_DISABLED] Unknown or disabled tool '${toolName}'`,
+      "TOOL_DISABLED",
+    ),
   };
 }

@@ -84,6 +84,7 @@ import { ControlUiServer } from "./src/control-ui.js";
 import { TunnelClient } from "./src/tunnel-client.js";
 import {
   buildDaemonHealth,
+  DaemonHealthSchema,
   writeDaemonHealth,
   type DaemonHealth,
 } from "./src/health.js";
@@ -555,6 +556,11 @@ function testHealthWriter(): void {
         version: "test-version",
         workerVersion: "worker-test",
         protocolWarning: "upgrade_daemon",
+        connectedAt: new Date("2026-01-01T00:00:01.000Z"),
+        lastDisconnectAt: new Date("2025-12-31T23:59:00.000Z"),
+        lastDisconnectReason: "network_lost",
+        reconnectAttempt: 2,
+        nextReconnectAt: new Date("2026-01-01T00:00:05.000Z"),
       },
     );
     writeDaemonHealth(health, healthPath);
@@ -582,6 +588,19 @@ function testHealthWriter(): void {
     assertEqual(parsed.version, "test-version", "health version");
     assertEqual(parsed.worker_version, "worker-test", "health worker_version");
     assertEqual(parsed.protocol_warning, "upgrade_daemon", "health protocol_warning");
+    assertEqual(parsed.connected_at, "2026-01-01T00:00:01.000Z", "health connected_at");
+    assertEqual(
+      parsed.last_disconnect_at,
+      "2025-12-31T23:59:00.000Z",
+      "health last_disconnect_at",
+    );
+    assertEqual(parsed.last_disconnect_reason, "network_lost", "health last_disconnect_reason");
+    assertEqual(parsed.reconnect_attempt, 2, "health reconnect_attempt");
+    assertEqual(parsed.next_reconnect_at, "2026-01-01T00:00:05.000Z", "health next_reconnect_at");
+    assert(
+      DaemonHealthSchema.safeParse(parsed).success,
+      "health.json matches DaemonHealthSchema",
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -631,6 +650,13 @@ function testTunnelAuthOkHandling(): void {
     assertEqual(parsed.worker_version, "worker-1.2.3", "auth_ok writes worker_version");
     assertEqual(parsed.protocol_warning, "upgrade_daemon", "auth_ok writes protocol warning");
     assertEqual(parsed.tunnel, "connected", "compatible auth_ok connects");
+    assert(
+      typeof parsed.connected_at === "string" &&
+        !Number.isNaN(Date.parse(parsed.connected_at)),
+      "compatible auth_ok writes connected_at",
+    );
+    assertEqual(parsed.reconnect_attempt, 0, "compatible auth_ok resets reconnect_attempt");
+    assertEqual(parsed.next_reconnect_at, null, "compatible auth_ok clears next_reconnect_at");
     warningClient.disconnect();
 
     const incompatibleClient = new TunnelClient(config, executor, logger, {
@@ -658,6 +684,11 @@ function testTunnelAuthOkHandling(): void {
     );
     assertEqual(parsed.tunnel, "disconnected", "incompatible auth_ok disconnects");
     assertEqual(incompatibleClient.getState(), "stopped", "incompatible auth_ok leaves client stopped");
+    assertEqual(
+      parsed.last_disconnect_reason,
+      "protocol_version_unsupported",
+      "incompatible auth_ok writes disconnect reason",
+    );
   } finally {
     logger.shutdown();
     rmSync(dir, { recursive: true, force: true });
@@ -743,6 +774,34 @@ function testTunnelOpsAlerts(): void {
     );
 
     client.disconnect();
+
+    now = 123_000;
+    const backoffClient = new TunnelClient(config, executor, logger, {
+      healthPath,
+      notifier: (title, body) => alerts.push({ title, body }),
+      now: () => now,
+    });
+    const backoffInternals = backoffClient as unknown as {
+      onMessageLine(line: string): void;
+      onClose(code: number, reason: Buffer): void;
+    };
+    backoffInternals.onMessageLine(authOk("session-backoff"));
+    backoffInternals.onClose(1006, Buffer.from("network_lost_for_backoff"));
+    const parsed = JSON.parse(readFileSync(healthPath, "utf-8")) as DaemonHealth;
+    assertEqual(parsed.tunnel, "connecting", "backoff health marks tunnel connecting");
+    assertEqual(
+      parsed.last_disconnect_reason,
+      "network_lost_for_backoff",
+      "backoff health writes last_disconnect_reason",
+    );
+    assertEqual(parsed.reconnect_attempt, 1, "backoff health increments reconnect_attempt");
+    assertEqual(
+      parsed.next_reconnect_at,
+      new Date(now + 1000).toISOString(),
+      "backoff health writes next_reconnect_at",
+    );
+    assertEqual(parsed.connected_at, null, "backoff health clears connected_at");
+    backoffClient.disconnect();
   } finally {
     logger.shutdown();
     rmSync(dir, { recursive: true, force: true });
@@ -1572,6 +1631,10 @@ async function testBudgets(): Promise<void> {
       (exceeded.message || "").includes("max_tool_calls_per_hour"),
       "message mentions tool calls",
     );
+    assert(
+      (exceeded.message || "").includes("Wait for budget window"),
+      "BUDGET_EXCEEDED message includes actionable hint",
+    );
 
     const status = getBudgetStatus(policy);
     assertEqual(status.tool_calls_used, 3, "tool_calls_used is 3");
@@ -1625,6 +1688,10 @@ async function testBudgets(): Promise<void> {
       assert(!outcome.ok, "budget-exceeded execution is denied");
       if (!outcome.ok) {
         assertEqual(outcome.code, "BUDGET_EXCEEDED", "budget alert code");
+        assert(
+          outcome.message.includes("Wait for budget window"),
+          "budget alert outcome includes actionable hint",
+        );
       }
       assertEqual(alerts.length, 1, "budget exceeded sends one alert");
       assertEqual(
@@ -2217,6 +2284,10 @@ function testSecurityMatrixWave4(): void {
   );
   assert(!sshWrite.allowed, "write to ~/.ssh denied under trusted ~");
   assertEqual(sshWrite.code, "PATH_PROTECTED", "PATH_PROTECTED for ~/.ssh write");
+  assert(
+    (sshWrite.reason || "").includes("Protected path; choose another file"),
+    "PATH_PROTECTED policy message includes actionable hint",
+  );
 
   const sshEval = evaluatePathAccess(
     join(homedir(), ".ssh", "id_rsa"),
@@ -2225,6 +2296,25 @@ function testSecurityMatrixWave4(): void {
   );
   assert(!sshEval.allowed, "evaluatePathAccess denies ~/.ssh write");
   assertEqual(sshEval.code, "PATH_PROTECTED", "evaluatePathAccess PATH_PROTECTED");
+  assert(
+    (sshEval.reason || "").includes("Protected path; choose another file"),
+    "evaluatePathAccess PATH_PROTECTED includes actionable hint",
+  );
+
+  const terminalDisabled = checkToolAllowed(
+    "execute_command",
+    { command: "echo hi" },
+    normalizePolicy({
+      allow_terminal: false,
+      require_confirmation: [],
+    }),
+  );
+  assert(!terminalDisabled.allowed, "terminal disabled blocks execute_command");
+  assertEqual(terminalDisabled.code, "TOOL_DISABLED", "terminal disabled → TOOL_DISABLED");
+  assert(
+    (terminalDisabled.reason || "").includes("Enable the tool or adjust policy.json"),
+    "TOOL_DISABLED message includes actionable hint",
+  );
 
   // --- denied_directories works ---
   const tmpRoot = mkdtempSync(join(tmpdir(), "deckagent-deny-"));
@@ -2251,6 +2341,10 @@ function testSecurityMatrixWave4(): void {
     );
     assert(!deniedWrite.allowed, "write under denied_directories blocked");
     assertEqual(deniedWrite.code, "PATH_DENIED", "PATH_DENIED code");
+    assert(
+      (deniedWrite.reason || "").includes("Denied path; choose a permitted directory"),
+      "PATH_DENIED message includes actionable hint",
+    );
   } finally {
     rmSync(tmpRoot, { recursive: true, force: true });
   }
@@ -2288,6 +2382,10 @@ function testSecurityMatrixWave4(): void {
       );
       assert(!escapeWrite.allowed, "symlink escape out of trusted dir denied");
       assertEqual(escapeWrite.code, "PATH_UNTRUSTED", "symlink escape → PATH_UNTRUSTED");
+      assert(
+        (escapeWrite.reason || "").includes("Untrusted path; stay under a trusted directory"),
+        "PATH_UNTRUSTED message includes actionable hint",
+      );
 
       const dotdot = evaluatePathAccess(
         // Raw string must retain ".." — path.join() would collapse them first.
@@ -2297,6 +2395,10 @@ function testSecurityMatrixWave4(): void {
       );
       assert(!dotdot.allowed, ".. path rejected when allow_dotdot=false");
       assertEqual(dotdot.code, "PATH_DENIED", ".. → PATH_DENIED");
+      assert(
+        (dotdot.reason || "").includes("Denied path; choose a permitted directory"),
+        "dotdot PATH_DENIED message includes actionable hint",
+      );
     }
   } finally {
     rmSync(linkRoot, { recursive: true, force: true });
@@ -2331,6 +2433,12 @@ function testSecurityMatrixWave4(): void {
     curlBlocked.code === "NETWORK_DENIED" || curlBlocked.code === "POLICY_BLOCKED",
     "curl deny has NETWORK_DENIED or POLICY_BLOCKED",
   );
+  if (curlBlocked.code === "NETWORK_DENIED") {
+    assert(
+      (curlBlocked.reason || "").includes("Use an allowed host or adjust network policy"),
+      "NETWORK_DENIED shell message includes actionable hint",
+    );
+  }
 
   const gitOk = checkToolAllowed(
     "execute_command",
@@ -2363,6 +2471,10 @@ function testSecurityMatrixWave4(): void {
   );
   assert(!evalDenied.allowed, "browser_evaluate scans code URL for host policy");
   assertEqual(evalDenied.code, "NETWORK_DENIED", "browser_evaluate denied URL → NETWORK_DENIED");
+  assert(
+    (evalDenied.reason || "").includes("Use an allowed host or adjust network policy"),
+    "NETWORK_DENIED browser message includes actionable hint",
+  );
 
   const navAllowed = checkToolAllowed(
     "browser_navigate",
@@ -2516,6 +2628,10 @@ function testSecurityMatrixWave4(): void {
       sandboxResult.code,
       "TERMINAL_SANDBOX_UNAVAILABLE",
       "sandbox_fs without binary → TERMINAL_SANDBOX_UNAVAILABLE",
+    );
+    assert(
+      (sandboxResult.reason || "").includes("Install bwrap/sandbox-exec"),
+      "TERMINAL_SANDBOX_UNAVAILABLE message includes actionable hint",
     );
   } finally {
     if (originalPath === undefined) {

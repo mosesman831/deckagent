@@ -27,6 +27,7 @@ import {
   isStaticResourceUri,
   readStaticResource,
 } from "./resource-catalog.js";
+import { appendErrorHint, getErrorHint } from "./error-hints.js";
 import { authenticateDevice, updateDeviceStatus } from "./device-registry.js";
 import {
   MIN_PROTOCOL_VERSION,
@@ -880,11 +881,16 @@ function jsonRpcError(
   rpcCode: number,
   status = 500
 ): Response {
+  const hint = getErrorHint(deckCode);
   return new Response(
     JSON.stringify({
       jsonrpc: "2.0",
       id,
-      error: { code: rpcCode, message, data: { code: deckCode } },
+      error: {
+        code: rpcCode,
+        message: appendErrorHint(message, deckCode),
+        data: { code: deckCode, ...(hint ? { hint } : {}) },
+      },
     }),
     { status, headers: { "Content-Type": "application/json" } }
   );
