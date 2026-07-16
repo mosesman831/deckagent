@@ -25,6 +25,7 @@ import {
 } from "../schemas.js";
 import { resolveToolPath } from "../workspace-context.js";
 import { createSnapshotBeforeMutation } from "./snapshots.js";
+import type { ToolExecutionContext } from "../index.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -45,6 +46,18 @@ export function getMaxFileReadSize(): number {
 function humanError(err: unknown, fallback: string): string {
   if (err instanceof Error) return err.message;
   return fallback;
+}
+
+function createAbortError(): Error {
+  const err = new Error("Aborted");
+  err.name = "AbortError";
+  return err;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw createAbortError();
+  }
 }
 
 async function isBinary(filePath: string): Promise<boolean> {
@@ -187,11 +200,15 @@ export async function edit_file(args: EditFileArgs): Promise<ToolResponse> {
   }
 }
 
-export async function search_files(args: SearchFilesArgs): Promise<ToolResponse> {
+export async function search_files(
+  args: SearchFilesArgs,
+  context?: ToolExecutionContext,
+): Promise<ToolResponse> {
   const parsed = SearchFilesArgsSchema.parse(args);
   const searchPath = resolveToolPath(parsed.path);
 
   try {
+    throwIfAborted(context?.signal);
     let output = "";
     try {
       const rgArgs = ["-n", "--color", "never", "--max-count", "10", parsed.pattern];
@@ -199,10 +216,19 @@ export async function search_files(args: SearchFilesArgs): Promise<ToolResponse>
         rgArgs.push("-g", parsed.file_glob);
       }
       rgArgs.push(searchPath);
-      const { stdout } = await execFileAsync("rg", rgArgs, { maxBuffer: 10 * 1024 * 1024 });
+      const { stdout } = await execFileAsync("rg", rgArgs, {
+        maxBuffer: 10 * 1024 * 1024,
+        signal: context?.signal,
+      });
       output = stdout;
     } catch {
-      output = await fallbackSearch(searchPath, parsed.pattern, parsed.file_glob, parsed.max_results);
+      output = await fallbackSearch(
+        searchPath,
+        parsed.pattern,
+        parsed.file_glob,
+        parsed.max_results,
+        context?.signal,
+      );
     }
 
     const lines = output.split("\n").filter(Boolean).slice(0, parsed.max_results);
@@ -210,6 +236,12 @@ export async function search_files(args: SearchFilesArgs): Promise<ToolResponse>
       content: [{ type: "text", text: lines.join("\n") || "No results found" }],
     };
   } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      return {
+        content: [{ type: "text", text: "Search aborted (best-effort)" }],
+        isError: true,
+      };
+    }
     return {
       content: [{ type: "text", text: `Failed to search files: ${humanError(err, "unknown error")}` }],
       isError: true,
@@ -222,13 +254,16 @@ async function fallbackSearch(
   pattern: string,
   fileGlob: string | undefined,
   maxResults: number,
+  signal?: AbortSignal,
 ): Promise<string> {
   const regex = new RegExp(pattern, "g");
   const results: string[] = [];
 
   async function walk(dir: string) {
+    throwIfAborted(signal);
     const entries = await fs.readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
+      throwIfAborted(signal);
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         await walk(fullPath);

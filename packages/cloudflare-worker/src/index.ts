@@ -22,6 +22,18 @@ export const DEFAULT_DEVICE_API_RATE_LIMIT_PER_MINUTE = 30;
 
 const startTime = Date.now();
 
+interface WorkerMetrics {
+  requests_total: number;
+  requests_by_route: Record<string, number>;
+  last_updated: string;
+}
+
+const workerMetrics: WorkerMetrics = {
+  requests_total: 0,
+  requests_by_route: {},
+  last_updated: new Date(startTime).toISOString(),
+};
+
 const DeviceRegisterSchema = z
   .object({
     device_id: z.string().uuid(),
@@ -69,6 +81,34 @@ function jsonResponse(
     status,
     headers: { "Content-Type": "application/json", ...cors },
   });
+}
+
+function recordWorkerRequest(pathname: string): void {
+  const route = routeForMetrics(pathname);
+  workerMetrics.requests_total += 1;
+  workerMetrics.requests_by_route[route] =
+    (workerMetrics.requests_by_route[route] ?? 0) + 1;
+  workerMetrics.last_updated = new Date().toISOString();
+}
+
+function routeForMetrics(pathname: string): string {
+  if (pathname === "/mcp") return "/mcp";
+  if (pathname.startsWith("/api/devices")) return "/api/devices";
+  if (pathname === "/tunnel") return "/tunnel";
+  if (pathname === "/metrics") return "/metrics";
+  if (pathname === "/health") return "/health";
+  return "other";
+}
+
+function getWorkerMetricsSnapshot(): Record<string, unknown> {
+  return {
+    ...workerMetrics,
+    started_at: new Date(startTime).toISOString(),
+    uptime_ms: Date.now() - startTime,
+    ephemeral: true,
+    note:
+      "Worker metrics are in-memory per isolate and reset when the isolate restarts.",
+  };
 }
 
 function errorResponse(
@@ -190,6 +230,7 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const cors = corsHeaders(request);
+    recordWorkerRequest(url.pathname);
 
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: cors });
@@ -205,6 +246,20 @@ export default {
           200,
           cors
         );
+      }
+
+      if (url.pathname === "/metrics") {
+        const auth = await requireApiToken(request, env, cors);
+        if (auth instanceof Response) return auth;
+        if (request.method !== "GET") {
+          return errorResponse(
+            405,
+            "METHOD_NOT_ALLOWED",
+            "Method not allowed",
+            cors
+          );
+        }
+        return jsonResponse(getWorkerMetricsSnapshot(), 200, cors);
       }
 
       if (url.pathname === "/tunnel") {

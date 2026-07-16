@@ -252,6 +252,44 @@ async function main() {
   );
   assert(badAuthRes.status === 401, `bad bearer → 401 (got ${badAuthRes.status})`);
 
+  const unauthMetricsRes = await worker.fetch(
+    new Request(url("/metrics"), { method: "GET" }),
+    env
+  );
+  assert(
+    unauthMetricsRes.status === 401,
+    `unauthenticated /metrics → 401 (got ${unauthMetricsRes.status})`
+  );
+
+  const metricsRes = await worker.fetch(
+    new Request(url("/metrics"), {
+      method: "GET",
+      headers: { authorization: `Bearer ${API_TOKEN}` },
+    }),
+    env
+  );
+  const metricsBody = (await metricsRes.json()) as {
+    requests_total?: number;
+    requests_by_route?: Record<string, number>;
+    ephemeral?: boolean;
+    note?: string;
+  };
+  assert(metricsRes.status === 200, `GET /metrics → 200 (got ${metricsRes.status})`);
+  assert(metricsBody.ephemeral === true, "/metrics marks counters ephemeral");
+  assert(
+    typeof metricsBody.requests_total === "number" &&
+      metricsBody.requests_total >= 2,
+    "/metrics includes request counter"
+  );
+  assert(
+    (metricsBody.requests_by_route?.["/metrics"] ?? 0) >= 2,
+    "/metrics includes per-route request counter"
+  );
+  assert(
+    metricsBody.note?.includes("in-memory per isolate") === true,
+    "/metrics documents isolate-local reset behavior"
+  );
+
   // --- 2. Device register / auth ---
   console.log("\n2. Device registration & auth");
   const deviceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -1444,6 +1482,7 @@ async function main() {
 
   console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
   if (failed > 0) process.exit(1);
+  process.exit(0);
 }
 
 main().catch((err) => {

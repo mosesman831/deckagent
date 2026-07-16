@@ -43,6 +43,11 @@ import {
   recordConfirmation,
   getBudgetStatus,
 } from "./budgets.js";
+import {
+  recordConfirmationMetric,
+  recordToolDeniedByCode,
+  recordToolOk,
+} from "./metrics.js";
 
 export interface ToolResultPayload {
   content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
@@ -330,6 +335,7 @@ export class ToolExecutor {
         restoreTargetCheck.requiresConfirmation
       ) {
         recordConfirmation();
+        recordConfirmationMetric();
         const confirmationReason = [
           policyResult.confirmationReason,
           restoreTargetCheck.confirmationReason,
@@ -399,9 +405,12 @@ export class ToolExecutor {
                 _sandbox?: TerminalSandboxPlan;
               },
               options.onProgress,
+              { signal: controller.signal },
             );
           }
-          return this.toolRegistry.execute(tool, execArgs);
+          return this.toolRegistry.execute(tool, execArgs, {
+            signal: controller.signal,
+          });
         };
 
         const result = (await this.runWithAbort(
@@ -475,6 +484,13 @@ export class ToolExecutor {
         },
         this.auditLogDir ? { logDir: this.auditLogDir } : undefined,
       );
+      if (outcome.ok) {
+        if (!outcome.result.isError) {
+          recordToolOk();
+        }
+      } else {
+        recordToolDeniedByCode(outcome.code);
+      }
     }
   }
 

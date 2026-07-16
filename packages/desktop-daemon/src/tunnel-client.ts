@@ -10,6 +10,7 @@ import {
   writeDaemonHealth,
   type HealthTunnelState,
 } from "./health.js";
+import { recordReconnectMetric } from "./metrics.js";
 
 interface ExecuteToolMessage {
   type: "execute_tool";
@@ -457,6 +458,7 @@ export class TunnelClient {
     this.logger.info(
       `Reconnecting in ${this.reconnectDelay}ms`,
     );
+    recordReconnectMetric();
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.reconnectDelay = Math.min(

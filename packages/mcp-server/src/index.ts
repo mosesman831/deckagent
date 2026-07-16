@@ -71,7 +71,11 @@ export interface ToolDefinition<T = unknown> {
   description: string;
   /** Schema output type is T; input may omit fields that have defaults. */
   inputSchema: z.ZodType<T, z.ZodTypeDef, unknown>;
-  handler: (args: T) => Promise<ToolResponse>;
+  handler: (args: T, context?: ToolExecutionContext) => Promise<ToolResponse>;
+}
+
+export interface ToolExecutionContext {
+  signal?: AbortSignal;
 }
 
 /** Erase tool argument type for heterogeneous registry storage (no `any`). */
@@ -100,7 +104,11 @@ export class ToolRegistry {
     return Array.from(this.tools.values());
   }
 
-  async execute(name: string, args: unknown): Promise<ToolResponse> {
+  async execute(
+    name: string,
+    args: unknown,
+    context?: ToolExecutionContext,
+  ): Promise<ToolResponse> {
     const tool = this.tools.get(name);
     if (!tool) {
       return {
@@ -118,7 +126,7 @@ export class ToolRegistry {
     }
 
     try {
-      return await tool.handler(parsed.data);
+      return await tool.handler(parsed.data, context);
     } catch (err) {
       const message = err instanceof Error ? err.message : "unknown error";
       return {
@@ -199,7 +207,7 @@ export function createRegistry(): ToolRegistry {
       name: "execute_command_stream",
       description: "Execute a command and stream output back in real-time.",
       inputSchema: ExecuteCommandStreamArgsSchema,
-      handler: (args) => execute_command_stream(args),
+      handler: (args, context) => execute_command_stream(args, undefined, context),
     }),
     defineTool({
       name: "list_processes",

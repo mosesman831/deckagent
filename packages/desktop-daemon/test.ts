@@ -72,6 +72,14 @@ import {
   setBudgetsPathForTest,
   resetBudgetsForTest,
 } from "./src/budgets.js";
+import {
+  readMetricsSnapshot,
+  recordConfirmationMetric,
+  recordReconnectMetric,
+  recordToolOk,
+  resetMetricsForTest,
+  setMetricsPathForTest,
+} from "./src/metrics.js";
 import { ControlUiServer } from "./src/control-ui.js";
 import { TunnelClient } from "./src/tunnel-client.js";
 import {
@@ -1336,6 +1344,83 @@ function testBudgets(): void {
   }
 }
 
+async function testMetricsCounters(): Promise<void> {
+  section("metrics counters (PR2.2)");
+
+  const dir = mkdtempSync(join(tmpdir(), "deckagent-metrics-"));
+  const metricsPath = join(dir, "metrics.json");
+  setMetricsPathForTest(metricsPath);
+  const logger = new Logger("error", false);
+  const confirmation = new ConfirmationServer(logger, { port: 19157 });
+  let executed = 0;
+  const registry = {
+    execute: async () => {
+      executed += 1;
+      return { content: [{ type: "text", text: "ok" }] };
+    },
+    register() {
+      return this;
+    },
+    get() {
+      return undefined;
+    },
+    list() {
+      return [];
+    },
+  } as unknown as ToolRegistry;
+
+  try {
+    resetMetricsForTest();
+    recordConfirmationMetric();
+    recordReconnectMetric();
+    recordToolOk();
+
+    const executor = new ToolExecutor({
+      toolRegistry: registry,
+      policy: {
+        ...createDefaultPolicy(),
+        require_confirmation: [],
+      },
+      logger,
+      confirmationServer: confirmation,
+      toolTimeoutSeconds: 5,
+    });
+
+    const ok = await executor.execute(
+      "metrics-ok",
+      "get_environment",
+      {},
+      { source: "local" },
+    );
+    assert(ok.ok, "metrics success execution ok");
+
+    const denied = await executor.execute(
+      "metrics-denied",
+      "unknown_tool_for_metrics",
+      {},
+      { source: "local" },
+    );
+    assert(!denied.ok, "metrics denied execution blocked");
+    assertEqual(executed, 1, "denied tool does not reach registry");
+
+    assert(existsSync(metricsPath), "metrics.json created");
+    const metrics = readMetricsSnapshot();
+    assertEqual(metrics.tool_ok, 2, "tool_ok increments");
+    assertEqual(metrics.confirmations, 1, "confirmations increments");
+    assertEqual(metrics.reconnects, 1, "reconnects increments");
+    assertEqual(
+      metrics.tool_denied_by_code.TOOL_DISABLED,
+      1,
+      "tool_denied_by_code increments by code",
+    );
+    assert(typeof metrics.last_updated === "string", "last_updated present");
+  } finally {
+    setMetricsPathForTest(null);
+    logger.shutdown();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 async function testControlUi(): Promise<void> {
   section("control UI (F5)");
 
@@ -1343,6 +1428,9 @@ async function testControlUi(): Promise<void> {
   const confirmation = new ConfirmationServer(logger, { port: 19150 });
   await confirmation.start();
   const uiTokenDir = mkdtempSync(join(tmpdir(), "deckagent-ui-token-"));
+  setMetricsPathForTest(join(uiTokenDir, "metrics.json"));
+  resetMetricsForTest();
+  recordToolOk();
 
   let policy = createDefaultPolicy();
   const control = new ControlUiServer({
@@ -1415,6 +1503,20 @@ async function testControlUi(): Promise<void> {
     assertEqual(status.worker_url, "https://example.workers.dev", "status worker_url");
     assertEqual(status.pending_approvals, 0, "no pending initially");
     assert(typeof status.daemon_version === "string", "daemon_version present");
+
+    const metricsNoToken = await fetch("http://127.0.0.1:19151/api/metrics");
+    assertEqual(metricsNoToken.status, 401, "GET /api/metrics without token → 401");
+
+    const metricsRes = await fetch("http://127.0.0.1:19151/api/metrics", {
+      headers: { "X-DeckAgent-UI-Token": uiToken },
+    });
+    assert(metricsRes.ok, "GET /api/metrics with token ok");
+    const metrics = (await metricsRes.json()) as {
+      tool_ok?: number;
+      last_updated?: string;
+    };
+    assertEqual(metrics.tool_ok, 1, "metrics endpoint returns tool_ok");
+    assert(typeof metrics.last_updated === "string", "metrics endpoint returns last_updated");
 
     const { id } = confirmation.createApproval({
       tool: "execute_command",
@@ -1495,6 +1597,7 @@ async function testControlUi(): Promise<void> {
   } finally {
     await control.stop();
     await confirmation.stop();
+    setMetricsPathForTest(null);
     rmSync(uiTokenDir, { recursive: true, force: true });
   }
 }
@@ -2137,6 +2240,7 @@ async function main(): Promise<void> {
   await testSandboxPlanAttachedByExecutor();
   testSecretsVault();
   testBudgets();
+  await testMetricsCounters();
   await testControlUi();
   testCapabilitiesMatrix();
   testSecurityMatrixWave4();

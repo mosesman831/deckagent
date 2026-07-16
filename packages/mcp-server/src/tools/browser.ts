@@ -10,6 +10,7 @@ import {
   type BrowserEvaluateArgs,
   type ToolResponse,
 } from "../schemas.js";
+import type { ToolExecutionContext } from "../index.js";
 
 const PLAYWRIGHT_INSTALL_HINT =
   "Playwright Chromium is not installed. Run: npx playwright install chromium";
@@ -124,6 +125,16 @@ function humanError(err: unknown, fallback: string): string {
   return fallback;
 }
 
+function createAbortError(): Error {
+  const err = new Error("Aborted");
+  err.name = "AbortError";
+  return err;
+}
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && err.name === "AbortError";
+}
+
 function isBrowserMissingError(err: unknown): boolean {
   const message = humanError(err, "").toLowerCase();
   return (
@@ -181,7 +192,10 @@ export async function closeBrowser(): Promise<void> {
   }
 }
 
-export async function browser_navigate(args: BrowserNavigateArgs): Promise<ToolResponse> {
+export async function browser_navigate(
+  args: BrowserNavigateArgs,
+  context?: ToolExecutionContext,
+): Promise<ToolResponse> {
   if (!browserEnabled) return disabledResponse();
 
   const parsed = BrowserNavigateArgsSchema.parse(args);
@@ -191,8 +205,19 @@ export async function browser_navigate(args: BrowserNavigateArgs): Promise<ToolR
   }
 
   try {
+    if (context?.signal?.aborted) {
+      throw createAbortError();
+    }
     const page = await ensurePage(parsed.headless);
-    await page.goto(parsed.url, { waitUntil: "load", timeout: 30_000 });
+    await runAbortable(
+      page.goto(parsed.url, { waitUntil: "load", timeout: 30_000 }),
+      context?.signal,
+      () => {
+        void page.close({ runBeforeUnload: false }).catch(() => {
+          // Closing the page is the best-effort Playwright cancellation mechanism.
+        });
+      },
+    );
     return {
       content: [
         {
@@ -202,6 +227,12 @@ export async function browser_navigate(args: BrowserNavigateArgs): Promise<ToolR
       ],
     };
   } catch (err) {
+    if (isAbortError(err)) {
+      return {
+        content: [{ type: "text", text: "Browser navigation aborted" }],
+        isError: true,
+      };
+    }
     if (isBrowserMissingError(err)) return playwrightMissingResponse(err);
     return {
       content: [
@@ -213,6 +244,47 @@ export async function browser_navigate(args: BrowserNavigateArgs): Promise<ToolR
       isError: true,
     };
   }
+}
+
+function runAbortable<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+  onAbort: () => void,
+): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    onAbort();
+    return Promise.reject(createAbortError());
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      signal.removeEventListener("abort", abortListener);
+    };
+    const abortListener = () => {
+      if (settled) return;
+      settled = true;
+      onAbort();
+      cleanup();
+      reject(createAbortError());
+    };
+    signal.addEventListener("abort", abortListener, { once: true });
+    promise.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      },
+      (err) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err);
+      },
+    );
+  });
 }
 
 async function installHostPolicyGuards(context: BrowserContext): Promise<void> {

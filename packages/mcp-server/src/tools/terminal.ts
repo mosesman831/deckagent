@@ -12,6 +12,7 @@ import {
 } from "../schemas.js";
 import { resolveToolPath } from "../workspace-context.js";
 import { buildSandboxCommand } from "./terminal-sandbox.js";
+import type { ToolExecutionContext } from "../index.js";
 
 const activeChildren = new Set<ChildProcess>();
 const SIGKILL_DELAY_MS = 500;
@@ -19,6 +20,16 @@ const SIGKILL_DELAY_MS = 500;
 function humanError(err: unknown, fallback: string): string {
   if (err instanceof Error) return err.message;
   return fallback;
+}
+
+function createAbortError(): Error {
+  const err = new Error("Aborted");
+  err.name = "AbortError";
+  return err;
+}
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && err.name === "AbortError";
 }
 
 function trackChild(child: ChildProcess): void {
@@ -65,9 +76,15 @@ function runShellCommand(
     timeoutMs?: number;
     onChunk?: (chunk: string) => void;
     sandbox?: ExecuteCommandArgs["_sandbox"];
+    signal?: AbortSignal;
   },
 ): Promise<{ stdout: string; stderr: string; code: number | null; timedOut: boolean }> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(createAbortError());
+      return;
+    }
+
     const env = { ...process.env, ...options.env };
     const child = options.sandbox
       ? spawnSandboxedCommand(command, options.workdir, options.sandbox, env)
@@ -83,20 +100,42 @@ function runShellCommand(
     let stderr = "";
     let timedOut = false;
     let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let abortListener: (() => void) | undefined;
+
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      if (abortListener) {
+        options.signal?.removeEventListener("abort", abortListener);
+      }
+    };
 
     const finish = (code: number | null) => {
       if (settled) return;
       settled = true;
+      cleanup();
       resolve({ stdout, stderr, code, timedOut });
     };
 
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err);
+    };
+
     if (options.timeoutMs !== undefined) {
       timer = setTimeout(() => {
         timedOut = true;
         forceKill(child);
       }, options.timeoutMs);
     }
+
+    abortListener = () => {
+      forceKill(child);
+      fail(createAbortError());
+    };
+    options.signal?.addEventListener("abort", abortListener, { once: true });
 
     child.stdout?.on("data", (data: Buffer) => {
       const text = data.toString("utf-8");
@@ -111,13 +150,11 @@ function runShellCommand(
     });
 
     child.on("error", (err) => {
-      if (timer) clearTimeout(timer);
       stderr += humanError(err, "unknown error");
       finish(1);
     });
 
     child.on("close", (code) => {
-      if (timer) clearTimeout(timer);
       finish(code);
     });
   });
@@ -143,7 +180,10 @@ function spawnSandboxedCommand(
   });
 }
 
-export async function execute_command(args: ExecuteCommandArgs): Promise<ToolResponse> {
+export async function execute_command(
+  args: ExecuteCommandArgs,
+  context?: ToolExecutionContext,
+): Promise<ToolResponse> {
   const parsed = ExecuteCommandArgsSchema.parse(args);
   const workdir = parsed.workdir ? resolveToolPath(parsed.workdir) : process.cwd();
   const timeoutMs = parsed.timeout * 1000;
@@ -154,6 +194,7 @@ export async function execute_command(args: ExecuteCommandArgs): Promise<ToolRes
       env: parsed.env,
       timeoutMs,
       sandbox: parsed._sandbox,
+      signal: context?.signal,
     });
 
     if (result.timedOut) {
@@ -177,6 +218,12 @@ export async function execute_command(args: ExecuteCommandArgs): Promise<ToolRes
       isError: result.code !== 0,
     };
   } catch (err) {
+    if (isAbortError(err)) {
+      return {
+        content: [{ type: "text", text: "Command aborted" }],
+        isError: true,
+      };
+    }
     return {
       content: [
         {
@@ -192,6 +239,7 @@ export async function execute_command(args: ExecuteCommandArgs): Promise<ToolRes
 export async function execute_command_stream(
   args: ExecuteCommandStreamArgs,
   onChunk?: (chunk: string) => void,
+  context?: ToolExecutionContext,
 ): Promise<ToolResponse> {
   const parsed = ExecuteCommandStreamArgsSchema.parse(args);
   const workdir = parsed.workdir ? resolveToolPath(parsed.workdir) : process.cwd();
@@ -202,6 +250,7 @@ export async function execute_command_stream(
       env: parsed.env,
       onChunk,
       sandbox: parsed._sandbox,
+      signal: context?.signal,
     });
 
     const parts: string[] = [];
@@ -214,6 +263,12 @@ export async function execute_command_stream(
       isError: result.code !== 0,
     };
   } catch (err) {
+    if (isAbortError(err)) {
+      return {
+        content: [{ type: "text", text: "Command aborted" }],
+        isError: true,
+      };
+    }
     return {
       content: [
         {

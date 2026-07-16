@@ -18,6 +18,7 @@ import {
   extractUnlockToken,
   validateAndConsumeUnlockToken,
 } from "./policy-lock.js";
+import { readMetricsSnapshot } from "./metrics.js";
 
 export const CONTROL_UI_HOST = "127.0.0.1";
 export const CONTROL_UI_PORT = 9150;
@@ -211,6 +212,12 @@ export class ControlUiServer {
         return;
       }
 
+      if (method === "GET" && url.pathname === "/api/metrics") {
+        if (!this.authorizeUiToken(req, res)) return;
+        sendJson(res, 200, readMetricsSnapshot());
+        return;
+      }
+
       if (method === "GET" && url.pathname === "/api/policy") {
         sendJson(res, 200, policySubset(this.getPolicy()));
         return;
@@ -299,6 +306,10 @@ export class ControlUiServer {
       return false;
     }
 
+    return this.authorizeUiToken(req, res);
+  }
+
+  private authorizeUiToken(req: IncomingMessage, res: ServerResponse): boolean {
     const token = this.uiToken;
     if (!token) {
       sendJson(res, 500, {

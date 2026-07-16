@@ -1,5 +1,6 @@
 import {
   createRegistry,
+  execute_command,
   execute_command_stream,
   closeBrowser,
   setBrowserHostPolicy,
@@ -294,6 +295,24 @@ async function main() {
     assert(!res.isError, `execute_command failed: ${textOf(res)}`);
     assert(textOf(res).includes("from deckagent"), "execute_command output mismatch");
     console.log("✓ execute_command");
+  }
+
+  // execute_command abort signal (best-effort)
+  {
+    const controller = new AbortController();
+    const started = Date.now();
+    const command = `"${process.execPath}" -e "setTimeout(() => {}, 30000)"`;
+    const running = execute_command(
+      { command, workdir: TEST_ROOT, timeout: 30 },
+      { signal: controller.signal },
+    );
+    setTimeout(() => controller.abort(), 100);
+    const res = await running;
+    const elapsed = Date.now() - started;
+    assert(res.isError, "aborted execute_command returns isError");
+    assert(textOf(res).toLowerCase().includes("aborted"), "abort result mentions aborted");
+    assert(elapsed < 5000, `abort returns promptly (elapsed ${elapsed}ms)`);
+    console.log("✓ execute_command abort signal");
   }
 
   // execute_command sandbox wrapping (fake bwrap records argv, then execs command after --)
