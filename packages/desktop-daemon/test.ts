@@ -72,6 +72,11 @@ import {
   resetBudgetsForTest,
 } from "./src/budgets.js";
 import { ControlUiServer } from "./src/control-ui.js";
+import {
+  buildDaemonHealth,
+  writeDaemonHealth,
+  type DaemonHealth,
+} from "./src/health.js";
 import type { ToolRegistry } from "@deckagent/mcp-server";
 import { resolve as resolvePath } from "node:path";
 
@@ -452,6 +457,52 @@ function testVersionFields(): void {
 
   assert(typeof DAEMON_VERSION === "string" && DAEMON_VERSION.length > 0, "DAEMON_VERSION set");
   assertEqual(PROTOCOL_VERSION, 1, "PROTOCOL_VERSION is 1");
+}
+
+function testHealthWriter(): void {
+  section("daemon health writer");
+
+  const dir = mkdtempSync(join(tmpdir(), "deckagent-health-"));
+  try {
+    const healthPath = join(dir, "health.json");
+    const health = buildDaemonHealth(
+      {
+        device_id: "11111111-1111-4111-8111-111111111111",
+        worker_url: "https://example.workers.dev",
+      },
+      "connected",
+      {
+        lastHeartbeatAt: new Date("2026-01-01T00:00:00.000Z"),
+        pid: 1234,
+        version: "test-version",
+      },
+    );
+    writeDaemonHealth(health, healthPath);
+
+    assert(existsSync(healthPath), "health.json created");
+    const parsed = JSON.parse(readFileSync(healthPath, "utf-8")) as DaemonHealth;
+    assertEqual(parsed.ok, true, "health ok true");
+    assertEqual(parsed.pid, 1234, "health pid");
+    assertEqual(
+      parsed.device_id,
+      "11111111-1111-4111-8111-111111111111",
+      "health device_id",
+    );
+    assertEqual(parsed.tunnel, "connected", "health tunnel connected");
+    assertEqual(
+      parsed.last_heartbeat_at,
+      "2026-01-01T00:00:00.000Z",
+      "health last_heartbeat_at",
+    );
+    assertEqual(
+      parsed.worker_url,
+      "https://example.workers.dev",
+      "health worker_url",
+    );
+    assertEqual(parsed.version, "test-version", "health version");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 async function testConfirmationFlow(): Promise<void> {
@@ -1363,6 +1414,7 @@ async function main(): Promise<void> {
   await testAuditViaExecutor();
   testNotificationNoThrow();
   testVersionFields();
+  testHealthWriter();
   await testConfirmationFlow();
   testConfigWorkspaceSchema();
   testWorkspacePathEnforcement();

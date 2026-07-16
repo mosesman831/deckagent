@@ -56,7 +56,7 @@ Usage:
   deckagent policy deny <path>    Add denied directory
   deckagent policy lock|unlock    Lock policy / create UI unlock token
   deckagent ui                 Open local control UI (http://127.0.0.1:9150)
-  deckagent doctor             Check DeckAgent health and prerequisites
+  deckagent doctor [--watch]   Check DeckAgent health and prerequisites
   deckagent uninstall          Stop daemon and remove config
   deckagent version            Print version
   deckagent help               Print this help message
@@ -148,7 +148,10 @@ async function main(): Promise<void> {
     }
 
     case 'doctor': {
-      await runDoctor();
+      const code = await runDoctor(args.slice(1));
+      if (code !== 0) {
+        process.exit(code);
+      }
       break;
     }
 

@@ -4,6 +4,11 @@ import type { Logger } from "./logger.js";
 import type { ToolExecutor } from "./tool-executor.js";
 import { readLocalResource } from "./resources.js";
 import { DAEMON_VERSION, PROTOCOL_VERSION } from "./version.js";
+import {
+  buildDaemonHealth,
+  writeDaemonHealth,
+  type HealthTunnelState,
+} from "./health.js";
 
 interface ExecuteToolMessage {
   type: "execute_tool";
@@ -62,6 +67,7 @@ export class TunnelClient {
   } | null = null;
   private state: ConnectionState = "stopped";
   private bufferedData = "";
+  private lastHeartbeatAt: Date | null = null;
 
   constructor(
     config: Config,
@@ -92,7 +98,7 @@ export class TunnelClient {
     if (this.state === "connecting" || this.state === "connected") {
       return;
     }
-    this.state = "connecting";
+    this.setState("connecting");
     this.shouldReconnect = true;
     this.bufferedData = "";
 
@@ -149,12 +155,13 @@ export class TunnelClient {
       this.ws = null;
     }
 
-    this.state = "stopped";
+    this.setState("stopped");
+    this.writeHealth("disconnected", false);
   }
 
   private onOpen(): void {
     this.logger.info("WebSocket open; sending auth");
-    this.state = "authenticating";
+    this.setState("authenticating");
     this.reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
     this.clearReconnectTimer();
     this.send({
@@ -234,7 +241,7 @@ export class TunnelClient {
 
   private handleAuthOk(): void {
     this.logger.info("Authentication successful");
-    this.state = "connected";
+    this.setState("connected");
     this.pendingAuth?.resolve();
     this.pendingAuth = null;
     this.startHeartbeat();
@@ -282,6 +289,8 @@ export class TunnelClient {
   private handleHeartbeatAck(): void {
     this.logger.debug("Heartbeat acknowledged");
     this.stopHeartbeatTimeout();
+    this.lastHeartbeatAt = new Date();
+    this.writeHealth();
   }
 
   private onClose(code: number, reason: Buffer): void {
@@ -295,7 +304,7 @@ export class TunnelClient {
 
     this.executor.abortAll();
 
-    this.state = "stopped";
+    this.setState("stopped");
 
     if (this.shouldReconnect && code !== 1008) {
       this.scheduleReconnect();
@@ -377,7 +386,7 @@ export class TunnelClient {
     this.clearReconnectTimer();
     if (!this.shouldReconnect) return;
     if (this.state === "connecting" || this.state === "connected") {
-      this.state = "stopped";
+      this.setState("stopped");
     }
 
     this.logger.info(
@@ -391,12 +400,49 @@ export class TunnelClient {
       );
       this.connect();
     }, this.reconnectDelay);
+    this.writeHealth("connecting", false);
   }
 
   private clearReconnectTimer(): void {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+  }
+
+  private setState(next: ConnectionState): void {
+    if (this.state === next) return;
+    this.state = next;
+    this.writeHealth();
+  }
+
+  private writeHealth(
+    tunnel = this.currentHealthTunnelState(),
+    ok = tunnel === "connected",
+  ): void {
+    try {
+      writeDaemonHealth(
+        buildDaemonHealth(this.config, tunnel, {
+          ok,
+          lastHeartbeatAt: this.lastHeartbeatAt ?? undefined,
+        }),
+      );
+    } catch (err) {
+      this.logger.warn(`Failed to write daemon health: ${humanError(err)}`);
+    }
+  }
+
+  private currentHealthTunnelState(): HealthTunnelState {
+    switch (this.state) {
+      case "connected":
+        return "connected";
+      case "connecting":
+      case "authenticating":
+        return "connecting";
+      case "stopped":
+        return this.shouldReconnect && this.reconnectTimer
+          ? "connecting"
+          : "disconnected";
     }
   }
 
