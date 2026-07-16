@@ -6,6 +6,7 @@ import {
   execute_command_stream,
   getSnapshotsDir,
   killAllActiveCommands,
+  setBrowserHostPolicy,
   setMaxFileReadSize,
   type TerminalSandboxPlan,
 } from "@deckagent/mcp-server";
@@ -123,9 +124,10 @@ export class ToolExecutor {
 
     try {
       setMaxFileReadSize(this.policy.max_file_read_size);
+      applyBrowserHostPolicy(this.policy, this.logger);
     } catch (err) {
       this.logger.warn(
-        `Could not set max file read size: ${err instanceof Error ? err.message : String(err)}`,
+        `Could not apply mcp-server runtime policy: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
@@ -157,6 +159,7 @@ export class ToolExecutor {
     this.policy = normalizePolicy(policy);
     try {
       setMaxFileReadSize(this.policy.max_file_read_size);
+      applyBrowserHostPolicy(this.policy, this.logger);
     } catch {
       // ignore
     }
@@ -605,6 +608,28 @@ function attachSandboxPlan(
   sandbox: TerminalSandboxPlan,
 ): Record<string, unknown> {
   return { ...args, _sandbox: sandbox };
+}
+
+function applyBrowserHostPolicy(
+  policy: Policy,
+  logger: Pick<Logger, "warn">,
+): void {
+  const network = policy.network ?? {
+    allow_browser_hosts: [],
+    deny_browser_hosts: [],
+    block_shell_net_tools: false,
+  };
+  setBrowserHostPolicy({
+    allow: network.allow_browser_hosts,
+    deny: network.deny_browser_hosts,
+    onNavigate: (url: string, allowed: boolean, reason?: string) => {
+      if (!allowed) {
+        logger.warn(
+          `[NETWORK_DENIED] Browser navigation blocked for ${url}: ${reason ?? "host denied"}`,
+        );
+      }
+    },
+  });
 }
 
 function findSnapshotMetadataById(id: string): SnapshotMetadata | null {

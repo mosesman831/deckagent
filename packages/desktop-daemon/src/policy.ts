@@ -607,8 +607,8 @@ export function checkToolAllowed(
     const url =
       typeof resolvedArgs.url === "string"
         ? resolvedArgs.url
-        : typeof resolvedArgs.expression === "string"
-          ? extractUrlFromExpression(resolvedArgs.expression)
+        : typeof resolvedArgs.code === "string"
+          ? extractUrlFromExpression(resolvedArgs.code)
           : null;
     if (url) {
       const netCheck = checkBrowserUrlAllowed(url, effective);

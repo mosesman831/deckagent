@@ -73,6 +73,7 @@ import {
   resetBudgetsForTest,
 } from "./src/budgets.js";
 import { ControlUiServer } from "./src/control-ui.js";
+import { TunnelClient } from "./src/tunnel-client.js";
 import {
   buildDaemonHealth,
   writeDaemonHealth,
@@ -526,6 +527,8 @@ function testHealthWriter(): void {
         lastHeartbeatAt: new Date("2026-01-01T00:00:00.000Z"),
         pid: 1234,
         version: "test-version",
+        workerVersion: "worker-test",
+        protocolWarning: "upgrade_daemon",
       },
     );
     writeDaemonHealth(health, healthPath);
@@ -551,7 +554,86 @@ function testHealthWriter(): void {
       "health worker_url",
     );
     assertEqual(parsed.version, "test-version", "health version");
+    assertEqual(parsed.worker_version, "worker-test", "health worker_version");
+    assertEqual(parsed.protocol_warning, "upgrade_daemon", "health protocol_warning");
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function testTunnelAuthOkHandling(): void {
+  section("tunnel auth_ok compatibility handling (PR1.5)");
+
+  const dir = mkdtempSync(join(tmpdir(), "deckagent-auth-ok-"));
+  const healthPath = join(dir, "health.json");
+  const logger = new Logger("error", false);
+  const executor = {
+    abortAll() {
+      return undefined;
+    },
+  } as unknown as ToolExecutor;
+  const config = {
+    device_id: "11111111-1111-4111-8111-111111111111",
+    token: "t".repeat(32),
+    worker_url: "https://example.workers.dev",
+    device_name: "test-device",
+    heartbeat_interval: 15,
+    tool_timeout: 60,
+    auto_connect: true,
+    log_level: "error" as const,
+  };
+
+  try {
+    const warningClient = new TunnelClient(config, executor, logger, {
+      healthPath,
+    });
+    (
+      warningClient as unknown as {
+        onMessageLine(line: string): void;
+      }
+    ).onMessageLine(
+      JSON.stringify({
+        type: "auth_ok",
+        session_id: "session-1",
+        worker_version: "worker-1.2.3",
+        min_protocol_version: PROTOCOL_VERSION,
+        server_time: Date.now(),
+        warning: "upgrade_daemon",
+      }),
+    );
+    let parsed = JSON.parse(readFileSync(healthPath, "utf-8")) as DaemonHealth;
+    assertEqual(parsed.worker_version, "worker-1.2.3", "auth_ok writes worker_version");
+    assertEqual(parsed.protocol_warning, "upgrade_daemon", "auth_ok writes protocol warning");
+    assertEqual(parsed.tunnel, "connected", "compatible auth_ok connects");
+    warningClient.disconnect();
+
+    const incompatibleClient = new TunnelClient(config, executor, logger, {
+      healthPath,
+    });
+    (
+      incompatibleClient as unknown as {
+        onMessageLine(line: string): void;
+      }
+    ).onMessageLine(
+      JSON.stringify({
+        type: "auth_ok",
+        session_id: "session-2",
+        worker_version: "worker-9.0.0",
+        min_protocol_version: PROTOCOL_VERSION + 1,
+        server_time: Date.now(),
+      }),
+    );
+    parsed = JSON.parse(readFileSync(healthPath, "utf-8")) as DaemonHealth;
+    assertEqual(parsed.worker_version, "worker-9.0.0", "incompatible auth_ok writes worker version");
+    assert(
+      typeof parsed.protocol_warning === "string" &&
+        parsed.protocol_warning.includes("requires tunnel protocol"),
+      "incompatible auth_ok writes clear protocol warning",
+    );
+    assertEqual(parsed.tunnel, "disconnected", "incompatible auth_ok disconnects");
+    assertEqual(incompatibleClient.getState(), "stopped", "incompatible auth_ok leaves client stopped");
+  } finally {
+    logger.shutdown();
     rmSync(dir, { recursive: true, force: true });
   }
 }
@@ -1615,6 +1697,31 @@ function testSecurityMatrixWave4(): void {
   );
   assert(gitOk.allowed, "strict allowlist allows git status");
 
+  const browserPolicy = normalizePolicy({
+    profile: "dev",
+    allow_browser: true,
+    network: {
+      allow_browser_hosts: ["example.com"],
+      deny_browser_hosts: ["blocked.example.com"],
+      block_shell_net_tools: false,
+    },
+    require_confirmation: [],
+  });
+  const evalDenied = checkToolAllowed(
+    "browser_evaluate",
+    { code: "window.location = 'https://blocked.example.com/path'" },
+    browserPolicy,
+  );
+  assert(!evalDenied.allowed, "browser_evaluate scans code URL for host policy");
+  assertEqual(evalDenied.code, "NETWORK_DENIED", "browser_evaluate denied URL → NETWORK_DENIED");
+
+  const navAllowed = checkToolAllowed(
+    "browser_navigate",
+    { url: "https://example.com", headless: true },
+    browserPolicy,
+  );
+  assert(navAllowed.allowed, "browser_navigate allows configured host");
+
   const pythonInlineBlocked = checkToolAllowed(
     "execute_command",
     { command: "python -c 'print(1)'" },
@@ -1759,12 +1866,14 @@ async function testCustomToolPlugins(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "deckagent-plugins-"));
   const pluginsRoot = join(dir, "plugins");
   const helloDir = join(pluginsRoot, "hello");
+  const slowDir = join(pluginsRoot, "slow");
   const collisionDir = join(pluginsRoot, "collision");
   const logger = new Logger("error", false);
   const confirmation = new ConfirmationServer(logger, { port: 19154 });
 
   try {
     mkdirSync(helloDir, { recursive: true });
+    mkdirSync(slowDir, { recursive: true });
     mkdirSync(collisionDir, { recursive: true });
     writeFileSync(
       join(helloDir, "plugin.json"),
@@ -1789,9 +1898,44 @@ async function testCustomToolPlugins(): Promise<void> {
     writeFileSync(
       join(helloDir, "index.mjs"),
       `export async function run(args) {
+  if (args.message === "env") {
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          secret: process.env.DECKAGENT_PLUGIN_SECRET ?? null,
+          envKeys: Object.keys(process.env).sort()
+        })
+      }],
+      isError: false
+    };
+  }
   return { content: [{ type: "text", text: JSON.stringify(args) }], isError: false };
 }
 `,
+    );
+    writeFileSync(
+      join(slowDir, "plugin.json"),
+      JSON.stringify(
+        {
+          name: "slow_plugin",
+          description: "Slow plugin",
+          version: "1.0.0",
+          entry: "index.mjs",
+          inputSchema: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+          require_confirmation: false,
+        },
+        null,
+        2,
+      ),
+    );
+    writeFileSync(
+      join(slowDir, "index.mjs"),
+      "export async function run() { await new Promise((resolve) => setTimeout(resolve, 5000)); return { content: [{ type: 'text', text: 'too late' }] }; }\n",
     );
     writeFileSync(
       join(collisionDir, "plugin.json"),
@@ -1817,6 +1961,7 @@ async function testCustomToolPlugins(): Promise<void> {
       profile: "dev",
       allow_plugins: true,
       require_confirmation: [],
+      max_command_timeout: 1,
     });
     const loaded = await loadPlugins({
       registry,
@@ -1825,8 +1970,15 @@ async function testCustomToolPlugins(): Promise<void> {
       pluginsRoot,
     });
 
-    assertEqual(loaded.plugins.length, 1, "loads one valid plugin");
-    assertEqual(loaded.plugins[0]?.name, "hello_plugin", "loads hello_plugin");
+    assertEqual(loaded.plugins.length, 2, "loads valid plugins");
+    assert(
+      loaded.plugins.some((plugin) => plugin.name === "hello_plugin"),
+      "loads hello_plugin",
+    );
+    assert(
+      loaded.plugins.some((plugin) => plugin.name === "slow_plugin"),
+      "loads slow_plugin",
+    );
     assert(
       !loaded.plugins.some((plugin) => plugin.name === "read_file"),
       "rejects builtin name collision",
@@ -1842,7 +1994,7 @@ async function testCustomToolPlugins(): Promise<void> {
       logger,
       confirmationServer: confirmation,
       toolTimeoutSeconds: 5,
-      pluginToolNames: ["hello_plugin"],
+      pluginToolNames: loaded.plugins.map((plugin) => plugin.name),
     });
 
     assert(
@@ -1860,6 +2012,50 @@ async function testCustomToolPlugins(): Promise<void> {
     if (ok.ok) {
       const text = ok.result.content[0]?.text ?? "";
       assert(text.includes('"message":"hi"'), "plugin receives validated args");
+    }
+
+    const originalSecret = process.env.DECKAGENT_PLUGIN_SECRET;
+    process.env.DECKAGENT_PLUGIN_SECRET = "do-not-leak";
+    try {
+      const envResult = await executor.execute(
+        "plugin-env-1",
+        "hello_plugin",
+        { message: "env" },
+        { source: "local" },
+      );
+      assert(envResult.ok, "plugin env check executes");
+      if (envResult.ok) {
+        const text = envResult.result.content[0]?.text ?? "{}";
+        const env = JSON.parse(text) as {
+          secret: string | null;
+          envKeys: string[];
+        };
+        assertEqual(env.secret, null, "plugin child does not receive parent secret env");
+        assert(
+          env.envKeys.every((key) => ["HOME", "PATH", "TMPDIR"].includes(key)),
+          "plugin child env only contains PATH/HOME/TMPDIR",
+        );
+      }
+    } finally {
+      if (originalSecret === undefined) {
+        delete process.env.DECKAGENT_PLUGIN_SECRET;
+      } else {
+        process.env.DECKAGENT_PLUGIN_SECRET = originalSecret;
+      }
+    }
+
+    const timeout = await executor.execute(
+      "plugin-timeout-1",
+      "slow_plugin",
+      {},
+      { source: "local" },
+    );
+    assert(timeout.ok && !!timeout.result.isError, "plugin timeout returns tool error");
+    if (timeout.ok) {
+      assert(
+        (timeout.result.content[0]?.text ?? "").includes("timed out"),
+        "plugin timeout error is human-readable",
+      );
     }
 
     const invalid = await executor.execute(
@@ -1900,6 +2096,18 @@ async function testCustomToolPlugins(): Promise<void> {
         "plugin deny message names allow_plugins=false",
       );
     }
+
+    const disabledLoad = await loadPlugins({
+      registry: createRegistry(),
+      policy: normalizePolicy({
+        profile: "dev",
+        allow_plugins: false,
+        require_confirmation: [],
+      }),
+      logger,
+      pluginsRoot,
+    });
+    assertEqual(disabledLoad.plugins.length, 0, "allow_plugins=false skips plugin loading");
   } finally {
     logger.shutdown();
     rmSync(dir, { recursive: true, force: true });
@@ -1919,6 +2127,7 @@ async function main(): Promise<void> {
   testNotificationNoThrow();
   testVersionFields();
   testHealthWriter();
+  testTunnelAuthOkHandling();
   await testConfirmationFlow();
   testConfigWorkspaceSchema();
   testWorkspacePathEnforcement();

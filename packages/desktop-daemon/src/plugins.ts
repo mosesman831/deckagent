@@ -1,13 +1,15 @@
 import { promises as fs } from "node:fs";
+import { fork } from "node:child_process";
 import { homedir } from "node:os";
 import {
   basename,
+  dirname,
   join,
   resolve as resolvePath,
   sep,
   normalize,
 } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { ToolRegistry } from "@deckagent/mcp-server";
 import type { Policy } from "./policy.js";
@@ -140,7 +142,15 @@ const PluginResponseSchema: z.ZodType<PluginToolResponse> = z.object({
 });
 
 type PluginManifest = z.infer<typeof PluginManifestSchema>;
-type PluginRun = (args: unknown) => Promise<unknown>;
+
+const PluginChildMessageSchema = z.union([
+  z.object({ type: z.literal("result"), result: PluginResponseSchema }),
+  z.object({ type: z.literal("error"), message: z.string() }),
+]);
+
+type PluginChildMessage = z.infer<typeof PluginChildMessageSchema>;
+
+const PLUGIN_CHILD_PATH = join(dirname(fileURLToPath(import.meta.url)), "plugin-child.js");
 
 export function getPluginsRoot(): string {
   return join(homedir(), ".deckagent", "plugins");
@@ -189,6 +199,7 @@ export async function loadPlugins(options: {
     const loaded = await loadOnePlugin({
       registry: options.registry,
       logger: options.logger,
+      policy: options.policy,
       rootReal,
       pluginDir,
       loadedNames,
@@ -276,6 +287,7 @@ export async function listPlugins(options?: {
 async function loadOnePlugin(options: {
   registry: ToolRegistry;
   logger: Pick<Logger, "info" | "warn">;
+  policy: Policy;
   rootReal: string;
   pluginDir: string;
   loadedNames: Set<string>;
@@ -306,14 +318,8 @@ async function loadOnePlugin(options: {
       throw new Error("plugin entry resolves outside plugins root");
     }
 
-    const mod = (await import(pathToFileURL(entryReal).href)) as {
-      run?: unknown;
-    };
-    if (typeof mod.run !== "function") {
-      throw new Error("plugin entry must export async function run(args)");
-    }
-    const run = mod.run as PluginRun;
     const inputValidator = createZodSchemaFromJsonSchema(manifest.inputSchema);
+    const timeoutMs = options.policy.max_command_timeout * 1000;
 
     options.registry.register({
       name: manifest.name,
@@ -321,20 +327,36 @@ async function loadOnePlugin(options: {
       inputSchema: inputValidator,
       handler: async (args) => {
         options.logger.info(`Executing plugin:${manifest.name}`);
-        const response = await run(args);
-        const parsed = PluginResponseSchema.safeParse(response);
-        if (!parsed.success) {
+        const jsonArgs = JsonValueSchema.safeParse(args);
+        if (!jsonArgs.success) {
           return {
             content: [
               {
                 type: "text",
-                text: `Plugin '${manifest.name}' returned an invalid ToolResponse: ${parsed.error.message}`,
+                text: `Plugin '${manifest.name}' arguments must be JSON-serializable: ${jsonArgs.error.message}`,
               },
             ],
             isError: true,
           };
         }
-        return parsed.data;
+        try {
+          return await runPluginInChild({
+            name: manifest.name,
+            entry: entryReal,
+            args: jsonArgs.data,
+            timeoutMs,
+          });
+        } catch (err) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Plugin '${manifest.name}' failed: ${humanError(err)}`,
+              },
+            ],
+            isError: true,
+          };
+        }
       },
     });
 
@@ -354,6 +376,100 @@ async function loadOnePlugin(options: {
     );
     return null;
   }
+}
+
+async function runPluginInChild(options: {
+  name: string;
+  entry: string;
+  args: JsonValue;
+  timeoutMs: number;
+}): Promise<PluginToolResponse> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const child = fork(PLUGIN_CHILD_PATH, [], {
+      env: strippedPluginEnv(),
+      execArgv: [],
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+    });
+
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGKILL");
+      reject(
+        new Error(
+          `timed out after ${Math.round(options.timeoutMs / 1000)}s`,
+        ),
+      );
+    }, options.timeoutMs);
+
+    const finish = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      fn();
+    };
+
+    child.once("message", (raw: unknown) => {
+      const parsed = PluginChildMessageSchema.safeParse(raw);
+      if (!parsed.success) {
+        finish(() =>
+          reject(
+            new Error(`invalid child response: ${parsed.error.message}`),
+          ),
+        );
+        child.kill("SIGKILL");
+        return;
+      }
+
+      const message: PluginChildMessage = parsed.data;
+      if (message.type === "error") {
+        finish(() => reject(new Error(message.message)));
+        return;
+      }
+      finish(() => resolve(message.result));
+    });
+
+    child.once("error", (err) => {
+      finish(() => reject(new Error(`child process error: ${humanError(err)}`)));
+    });
+
+    child.once("exit", (code, signal) => {
+      finish(() =>
+        reject(
+          new Error(
+            `child process exited before result (code=${String(code)}, signal=${String(signal)})`,
+          ),
+        ),
+      );
+    });
+
+    child.send(
+      {
+        type: "run",
+        entry: options.entry,
+        args: options.args,
+      },
+      (err) => {
+        if (err) {
+          finish(() =>
+            reject(new Error(`failed to send run message: ${humanError(err)}`)),
+          );
+        }
+      },
+    );
+  });
+}
+
+function strippedPluginEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of ["PATH", "HOME", "TMPDIR"] as const) {
+    const value = process.env[key];
+    if (typeof value === "string") {
+      env[key] = value;
+    }
+  }
+  return env;
 }
 
 async function readManifest(path: string): Promise<PluginManifest> {

@@ -2,6 +2,9 @@ import {
   createRegistry,
   execute_command_stream,
   closeBrowser,
+  setBrowserHostPolicy,
+  browserHostMatches,
+  evaluateBrowserHostPolicy,
   setWorkspaceContext,
   getWorkspaceContext,
   setSnapshotsDir,
@@ -386,6 +389,38 @@ async function main() {
       setTimeout(resolve, 2000);
     });
     console.log("✓ kill_process");
+  }
+
+  // browser host policy matcher/wiring
+  {
+    assert(browserHostMatches("example.com", "example.com"), "host exact match");
+    assert(browserHostMatches("app.example.com", "*.example.com"), "host wildcard subdomain match");
+    assert(browserHostMatches("example.com", "*.example.com"), "host wildcard apex match");
+    assert(!browserHostMatches("evil-example.com", "*.example.com"), "host wildcard suffix boundary");
+
+    setBrowserHostPolicy({
+      allow: ["example.com", "*.trusted.test"],
+      deny: ["blocked.example.com"],
+    });
+    const allowed = evaluateBrowserHostPolicy("https://app.trusted.test/path");
+    assert(allowed.allowed, "allowed browser host passes policy");
+    const denied = evaluateBrowserHostPolicy("https://blocked.example.com/path");
+    assert(!denied.allowed, "deny list wins over allow list");
+    assert(
+      (denied.reason ?? "").includes("denied"),
+      "denied browser host has human-readable reason",
+    );
+    const notAllowed = evaluateBrowserHostPolicy("https://other.test/path");
+    assert(!notAllowed.allowed, "non-allowlisted browser host denied");
+
+    setBrowserHostPolicy({
+      allow: [],
+      deny: ["*.bad.test"],
+    });
+    assert(evaluateBrowserHostPolicy("https://ok.test").allowed, "empty allow list permits non-denied hosts");
+    assert(!evaluateBrowserHostPolicy("https://x.bad.test").allowed, "deny list blocks with empty allow list");
+    setBrowserHostPolicy(null);
+    console.log("✓ browser host policy matcher");
   }
 
   // browser_* — success if chromium available, else graceful isError with install hint

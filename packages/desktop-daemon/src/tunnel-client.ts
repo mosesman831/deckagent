@@ -1,4 +1,5 @@
 import WebSocket from "ws";
+import { z } from "zod";
 import type { Config } from "./config.js";
 import type { Logger } from "./logger.js";
 import type { ToolExecutor } from "./tool-executor.js";
@@ -23,6 +24,19 @@ interface ReadResourceMessage {
   uri: string;
   args?: Record<string, unknown>;
 }
+
+const AuthOkMessageSchema = z
+  .object({
+    type: z.literal("auth_ok"),
+    session_id: z.string().min(1),
+    worker_version: z.string().min(1),
+    min_protocol_version: z.number().int().nonnegative(),
+    server_time: z.number(),
+    warning: z.string().min(1).optional(),
+  })
+  .strict();
+
+type AuthOkMessage = z.infer<typeof AuthOkMessageSchema>;
 
 /** Payload sent as tunnel `policy_caps` for Worker tools/list filtering. */
 export type PolicyCapsPayload = {
@@ -73,17 +87,24 @@ export class TunnelClient {
   private state: ConnectionState = "stopped";
   private bufferedData = "";
   private lastHeartbeatAt: Date | null = null;
+  private workerVersion: string | undefined;
+  private protocolWarning: string | undefined;
+  private healthPath: string | undefined;
 
   constructor(
     config: Config,
     executor: ToolExecutor,
     logger: Logger,
-    options?: { getCaps?: () => PolicyCapsPayload },
+    options?: {
+      getCaps?: () => PolicyCapsPayload;
+      healthPath?: string;
+    },
   ) {
     this.config = config;
     this.executor = executor;
     this.logger = logger;
     this.getCaps = options?.getCaps ?? null;
+    this.healthPath = options?.healthPath;
   }
 
   getState(): ConnectionState {
@@ -209,7 +230,7 @@ export class TunnelClient {
 
     switch (type) {
       case "auth_ok":
-        this.handleAuthOk();
+        this.handleAuthOk(msg);
         break;
       case "auth_error":
         this.handleAuthError(msg);
@@ -244,7 +265,45 @@ export class TunnelClient {
     }
   }
 
-  private handleAuthOk(): void {
+  private handleAuthOk(raw: Record<string, unknown>): void {
+    const parsed = AuthOkMessageSchema.safeParse(raw);
+    if (!parsed.success) {
+      const message = `Malformed auth_ok from Worker: ${parsed.error.message}`;
+      this.logger.error(message);
+      this.protocolWarning = message;
+      this.pendingAuth?.reject(new Error(message));
+      this.pendingAuth = null;
+      this.shouldReconnect = false;
+      this.ws?.close(1002, "malformed_auth_ok");
+      this.writeHealth("disconnected", false);
+      return;
+    }
+
+    const msg: AuthOkMessage = parsed.data;
+    this.workerVersion = msg.worker_version;
+    this.protocolWarning = msg.warning;
+
+    if (msg.min_protocol_version > PROTOCOL_VERSION) {
+      const message =
+        `Worker ${msg.worker_version} requires tunnel protocol ` +
+        `${msg.min_protocol_version}, but this daemon supports ${PROTOCOL_VERSION}. ` +
+        "Upgrade DeckAgent before reconnecting.";
+      this.logger.error(message);
+      this.protocolWarning = message;
+      this.pendingAuth?.reject(new Error(message));
+      this.pendingAuth = null;
+      this.shouldReconnect = false;
+      this.stopHeartbeat();
+      this.stopHeartbeatTimeout();
+      this.writeHealth("disconnected", false);
+      this.ws?.close(1002, "protocol_version_unsupported");
+      return;
+    }
+
+    if (msg.warning) {
+      this.logger.warn(`Worker compatibility warning: ${msg.warning}`);
+    }
+
     this.logger.info("Authentication successful");
     this.setState("connected");
     this.pendingAuth?.resolve();
@@ -431,7 +490,10 @@ export class TunnelClient {
         buildDaemonHealth(this.config, tunnel, {
           ok,
           lastHeartbeatAt: this.lastHeartbeatAt ?? undefined,
+          workerVersion: this.workerVersion,
+          protocolWarning: this.protocolWarning,
         }),
+        this.healthPath,
       );
     } catch (err) {
       this.logger.warn(`Failed to write daemon health: ${humanError(err)}`);

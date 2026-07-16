@@ -49,6 +49,11 @@ import {
   browser_evaluate,
   closeBrowser,
   setBrowserEnabled,
+  setBrowserHostPolicy,
+  browserHostMatches,
+  evaluateBrowserHostPolicy,
+  type BrowserHostPolicy,
+  type BrowserHostDecision,
 } from "./tools/browser.js";
 import { get_environment } from "./tools/environment.js";
 import {
@@ -285,6 +290,11 @@ export {
   browser_evaluate,
   closeBrowser,
   setBrowserEnabled,
+  setBrowserHostPolicy,
+  browserHostMatches,
+  evaluateBrowserHostPolicy,
+  type BrowserHostPolicy,
+  type BrowserHostDecision,
 };
 export { get_environment };
 export {

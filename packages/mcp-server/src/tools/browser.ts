@@ -1,4 +1,4 @@
-import type { Browser, Page } from "playwright";
+import type { Browser, BrowserContext, Page, Route } from "playwright";
 import {
   BrowserNavigateArgsSchema,
   BrowserScreenshotArgsSchema,
@@ -19,11 +19,97 @@ const BROWSER_DISABLED =
 
 let browserEnabled = false;
 let browserInstance: Browser | null = null;
+let browserContext: BrowserContext | null = null;
 let pageInstance: Page | null = null;
 let launchedHeadless: boolean | null = null;
 
+export interface BrowserHostPolicy {
+  allow: readonly string[];
+  deny: readonly string[];
+  onNavigate?: (url: string, allowed: boolean, reason?: string) => void;
+}
+
+export interface BrowserHostDecision {
+  allowed: boolean;
+  host?: string;
+  reason?: string;
+}
+
+let browserHostPolicy: BrowserHostPolicy | null = null;
+
 export function setBrowserEnabled(enabled: boolean): void {
   browserEnabled = enabled;
+}
+
+export function setBrowserHostPolicy(policy: BrowserHostPolicy | null): void {
+  browserHostPolicy = policy
+    ? {
+        allow: [...policy.allow],
+        deny: [...policy.deny],
+        onNavigate: policy.onNavigate,
+      }
+    : null;
+}
+
+export function browserHostMatches(host: string, pattern: string): boolean {
+  const normalizedHost = host.trim().toLowerCase();
+  const normalizedPattern = pattern.trim().toLowerCase();
+  if (!normalizedHost || !normalizedPattern) return false;
+  if (normalizedPattern === "*") return true;
+  if (normalizedPattern.startsWith("*.")) {
+    const suffix = normalizedPattern.slice(1);
+    return (
+      normalizedHost.endsWith(suffix) ||
+      normalizedHost === normalizedPattern.slice(2)
+    );
+  }
+  return normalizedHost === normalizedPattern;
+}
+
+export function evaluateBrowserHostPolicy(
+  urlString: string,
+  policy: BrowserHostPolicy | null = browserHostPolicy,
+): BrowserHostDecision {
+  if (!policy) return { allowed: true };
+
+  let host: string;
+  try {
+    const url = new URL(urlString);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return { allowed: true };
+    }
+    host = url.hostname.toLowerCase();
+  } catch {
+    return {
+      allowed: false,
+      reason: `Invalid browser URL '${urlString}'`,
+    };
+  }
+
+  for (const pattern of policy.deny) {
+    if (browserHostMatches(host, pattern)) {
+      return {
+        allowed: false,
+        host,
+        reason: `Host '${host}' is denied by browser host policy`,
+      };
+    }
+  }
+
+  if (policy.allow.length > 0) {
+    const allowed = policy.allow.some((pattern) =>
+      browserHostMatches(host, pattern),
+    );
+    if (!allowed) {
+      return {
+        allowed: false,
+        host,
+        reason: `Host '${host}' is not allowed by browser host policy`,
+      };
+    }
+  }
+
+  return { allowed: true, host };
 }
 
 function disabledResponse(): ToolResponse {
@@ -72,8 +158,10 @@ async function ensurePage(headless: boolean): Promise<Page> {
 
   const { chromium } = await import("playwright");
   browserInstance = await chromium.launch({ headless });
-  const context = await browserInstance.newContext();
-  pageInstance = await context.newPage();
+  browserContext = await browserInstance.newContext();
+  await installHostPolicyGuards(browserContext);
+  pageInstance = await browserContext.newPage();
+  attachPageNavigationGuard(pageInstance);
   launchedHeadless = headless;
   return pageInstance;
 }
@@ -81,6 +169,7 @@ async function ensurePage(headless: boolean): Promise<Page> {
 export async function closeBrowser(): Promise<void> {
   const browser = browserInstance;
   browserInstance = null;
+  browserContext = null;
   pageInstance = null;
   launchedHeadless = null;
   if (browser) {
@@ -96,6 +185,10 @@ export async function browser_navigate(args: BrowserNavigateArgs): Promise<ToolR
   if (!browserEnabled) return disabledResponse();
 
   const parsed = BrowserNavigateArgsSchema.parse(args);
+  const hostDecision = evaluateBrowserHostPolicy(parsed.url);
+  if (!hostDecision.allowed) {
+    return deniedHostResponse(hostDecision.reason ?? "Browser host denied");
+  }
 
   try {
     const page = await ensurePage(parsed.headless);
@@ -120,6 +213,48 @@ export async function browser_navigate(args: BrowserNavigateArgs): Promise<ToolR
       isError: true,
     };
   }
+}
+
+async function installHostPolicyGuards(context: BrowserContext): Promise<void> {
+  await context.route("**/*", async (route: Route) => {
+    const url = route.request().url();
+    const decision = evaluateBrowserHostPolicy(url);
+    if (!decision.allowed) {
+      browserHostPolicy?.onNavigate?.(url, false, decision.reason);
+      await route.abort("blockedbyclient");
+      return;
+    }
+    await route.continue();
+  });
+
+  context.on("page", (page) => {
+    attachPageNavigationGuard(page);
+  });
+}
+
+function attachPageNavigationGuard(page: Page): void {
+  page.on("framenavigated", (frame) => {
+    if (frame !== page.mainFrame()) return;
+    const url = frame.url();
+    const decision = evaluateBrowserHostPolicy(url);
+    browserHostPolicy?.onNavigate?.(
+      url,
+      decision.allowed,
+      decision.reason,
+    );
+    if (!decision.allowed) {
+      void page.close({ runBeforeUnload: false }).catch(() => {
+        // Route guards should block first; closing here is a last-resort fail-closed.
+      });
+    }
+  });
+}
+
+function deniedHostResponse(reason: string): ToolResponse {
+  return {
+    content: [{ type: "text", text: `[NETWORK_DENIED] ${reason}` }],
+    isError: true,
+  };
 }
 
 export async function browser_screenshot(args: BrowserScreenshotArgs): Promise<ToolResponse> {

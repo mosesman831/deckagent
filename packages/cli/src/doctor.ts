@@ -28,7 +28,9 @@ const HealthFileSchema = z.object({
   tunnel: z.enum(['connected', 'connecting', 'disconnected']),
   last_heartbeat_at: z.string().datetime(),
   worker_url: z.string().url(),
-  version: z.string().min(1)
+  version: z.string().min(1),
+  worker_version: z.string().min(1).optional(),
+  protocol_warning: z.string().min(1).optional()
 });
 
 export type HealthFile = z.infer<typeof HealthFileSchema>;
@@ -219,6 +221,26 @@ function healthCheckMessage(health: HealthReadResult, daemonRunning: boolean): s
   return health.message;
 }
 
+function compatibilityCheck(health: HealthReadResult): Check {
+  if (health.status !== 'present') {
+    return {
+      label: 'Worker compatibility',
+      ok: false,
+      message: `unknown (${health.status} health.json)`
+    };
+  }
+
+  const workerVersion = health.health.worker_version ?? 'unknown';
+  const warning = health.health.protocol_warning;
+  return {
+    label: 'Worker compatibility',
+    ok: !warning,
+    message: warning
+      ? `worker=${workerVersion}, warning=${warning}`
+      : `worker=${workerVersion}, protocol ok`
+  };
+}
+
 export async function collectDoctorResults(options: DoctorCollectOptions = {}): Promise<DoctorReport> {
   const intervalSeconds = options.intervalSeconds ?? 5;
   const staleAfterSeconds = Math.max(2 * intervalSeconds, 45);
@@ -292,6 +314,7 @@ export async function collectDoctorResults(options: DoctorCollectOptions = {}): 
     ok: healthCheckOk(health, daemonRunning),
     message: healthCheckMessage(health, daemonRunning)
   });
+  checks.push(compatibilityCheck(health));
 
   // OS info
   const platform = os.platform();

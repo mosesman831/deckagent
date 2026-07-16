@@ -17,6 +17,8 @@ export interface DaemonHealth {
   last_heartbeat_at: string;
   worker_url: string;
   version: string;
+  worker_version?: string;
+  protocol_warning?: string;
 }
 
 export function getHealthPath(baseDir = join(homedir(), ".deckagent")): string {
@@ -31,6 +33,8 @@ export function buildDaemonHealth(
     lastHeartbeatAt?: Date;
     pid?: number;
     version?: string;
+    workerVersion?: string;
+    protocolWarning?: string;
   } = {},
 ): DaemonHealth {
   return {
@@ -41,6 +45,10 @@ export function buildDaemonHealth(
     last_heartbeat_at: (options.lastHeartbeatAt ?? new Date()).toISOString(),
     worker_url: config.worker_url,
     version: options.version ?? DAEMON_VERSION,
+    ...(options.workerVersion ? { worker_version: options.workerVersion } : {}),
+    ...(options.protocolWarning
+      ? { protocol_warning: options.protocolWarning }
+      : {}),
   };
 }
 

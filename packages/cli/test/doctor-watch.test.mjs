@@ -40,7 +40,7 @@ function writeBaseFiles(baseDir) {
   fs.writeFileSync(path.join(baseDir, 'daemon.pid'), `${process.pid}\n`);
 }
 
-function writeHealth(baseDir, lastHeartbeatAt) {
+function writeHealth(baseDir, lastHeartbeatAt, extra = {}) {
   fs.writeFileSync(
     path.join(baseDir, 'health.json'),
     JSON.stringify(
@@ -51,7 +51,8 @@ function writeHealth(baseDir, lastHeartbeatAt) {
         tunnel: 'connected',
         last_heartbeat_at: lastHeartbeatAt,
         worker_url: 'https://example.workers.dev',
-        version: 'test-version'
+        version: 'test-version',
+        ...extra
       },
       null,
       2
@@ -106,6 +107,25 @@ await withTempDir(async (baseDir) => {
   assert.match(output.lines.at(-1), /unhealthy/);
   assert.match(output.lines.at(-1), /heartbeat=60\.0s stale/);
   assert.match(output.errors.at(-1), /unhealthy for 0\.02s/);
+});
+
+await withTempDir(async (baseDir) => {
+  writeBaseFiles(baseDir);
+  writeHealth(baseDir, '2026-01-01T00:00:00.000Z', {
+    worker_version: 'worker-1.2.3',
+    protocol_warning: 'upgrade_daemon'
+  });
+
+  const report = await collectDoctorResults({
+    baseDir,
+    intervalSeconds: 60,
+    now: () => Date.parse('2026-01-01T00:00:01.000Z')
+  });
+  const compatibility = report.checks.find((check) => check.label === 'Worker compatibility');
+  assert.ok(compatibility, 'Worker compatibility check exists');
+  assert.equal(compatibility.ok, false);
+  assert.match(compatibility.message, /worker=worker-1\.2\.3/);
+  assert.match(compatibility.message, /upgrade_daemon/);
 });
 
 console.log('All doctor watch tests passed.');
