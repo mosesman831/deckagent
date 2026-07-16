@@ -197,6 +197,11 @@ async function testSmokeCommandFailsOnInitializeError() {
   });
   assert.equal(code, 1);
   assert.match(output.errors.join('\n'), /Smoke FAIL/);
+  const text = [...output.lines, ...output.errors].join('\n');
+  assert.match(text, /== DeckAgent MCP Smoke ==/);
+  assert.match(text, /== Profile: mcpplayground ==/);
+  assert.match(text, /Hint: The Worker \/mcp endpoint must accept/);
+  assert.match(text, /Next: deckagent token rotate --deploy/);
 }
 
 async function testSmokeMatrixSkipsDaemonCallsWhenOffline() {

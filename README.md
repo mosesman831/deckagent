@@ -13,13 +13,48 @@ flowchart LR
 
 ## Quick Start
 
+1. Check prerequisites (Node.js 18+, npm, git, and a Cloudflare account):
+
 ```bash
-npx @deckagent/cli setup     # one-command setup wizard
-# or install once:
-npm install -g @deckagent/cli
+node --version
+npm --version
+git --version
 ```
 
-Then add the printed Worker URL as a custom MCP connector in ChatGPT, Claude, or Gemini using Bearer token authentication.
+2. Run the setup wizard. It logs into Cloudflare, creates Worker/KV resources,
+   deploys, registers this device, writes `~/.deckagent/config.json`, and starts
+   the daemon:
+
+```bash
+npx @deckagent/cli setup
+```
+
+3. Verify local readiness and the Worker MCP path:
+
+```bash
+deckagent onboard
+```
+
+4. Add DeckAgent to ChatGPT, Claude, or Gemini as a custom MCP connector:
+
+- Connector URL: use the `/mcp` URL printed by `deckagent setup` or
+  `deckagent onboard` (for example, `https://your-worker.workers.dev/mcp`)
+- Authentication: **Bearer token**
+- Token: the Worker API token printed by setup and stored as `api_token` in
+  `~/.deckagent/config.json`
+
+5. Open the local control UI to inspect health, approvals, devices, and audit:
+
+```bash
+deckagent ui
+```
+
+6. Troubleshoot or prove the connector path any time:
+
+```bash
+deckagent doctor --strict
+deckagent smoke --profile mcpplayground
+```
 
 ### Manual Setup
 

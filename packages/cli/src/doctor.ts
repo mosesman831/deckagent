@@ -4,12 +4,14 @@ import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { z } from 'zod';
 import { ConfigSchema, getConfigDir, getConfigPath, getPolicyPath } from './configure.js';
+import { commandLine, sectionTitle, statusText, supportsColor, type Output } from './ux.js';
 
 export interface Check {
   label: string;
   ok: boolean;
   value?: string;
   message?: string;
+  remediation?: string;
 }
 
 export interface DoctorPaths {
@@ -64,13 +66,19 @@ export interface DoctorCollectOptions {
 
 export interface DoctorWatchOptions extends DoctorCollectOptions {
   failAfterSeconds?: number;
-  output?: Pick<typeof console, 'log' | 'error'>;
+  output?: Output;
   sleep?: (ms: number) => Promise<void>;
   exitOnSigint?: boolean;
 }
 
+export interface DoctorCommandOptions extends DoctorCollectOptions {
+  output?: Output;
+}
+
 interface ParsedDoctorArgs {
   watch: boolean;
+  json: boolean;
+  strict: boolean;
   intervalSeconds: number;
   failAfterSeconds: number;
 }
@@ -241,6 +249,36 @@ function compatibilityCheck(health: HealthReadResult): Check {
   };
 }
 
+function remediationForCheck(check: Check): string {
+  switch (check.label) {
+    case 'npm':
+      return 'Install npm with Node.js 18+ and rerun deckagent doctor.';
+    case 'wrangler installed':
+      return 'Install Wrangler with `npm install -g wrangler` or rerun `deckagent setup`.';
+    case 'config.json':
+      return 'Create config with `deckagent setup`, or repair ~/.deckagent/config.json.';
+    case 'api_token configured':
+      return 'Run `deckagent token rotate --deploy`, or add api_token to ~/.deckagent/config.json.';
+    case 'policy.json':
+      return 'Create policy with `deckagent policy set-profile strict` or rerun `deckagent setup`.';
+    case 'daemon running':
+      return 'Start the daemon with `deckagent daemon` or debug in foreground with `deckagent daemon --foreground`.';
+    case 'daemon health':
+      return 'Run `deckagent daemon --foreground` and inspect `deckagent logs` for tunnel or health write errors.';
+    case 'Worker compatibility':
+      return 'Redeploy the Worker or upgrade the daemon so their protocol versions match.';
+    default:
+      return 'Run `deckagent doctor --json` for machine-readable details, then retry after fixing the failed check.';
+  }
+}
+
+function addRemediation(check: Check): Check {
+  if (check.ok) {
+    return check;
+  }
+  return { ...check, remediation: remediationForCheck(check) };
+}
+
 export async function collectDoctorResults(options: DoctorCollectOptions = {}): Promise<DoctorReport> {
   const intervalSeconds = options.intervalSeconds ?? 5;
   const staleAfterSeconds = Math.max(2 * intervalSeconds, 45);
@@ -322,9 +360,10 @@ export async function collectDoctorResults(options: DoctorCollectOptions = {}): 
   const release = os.release();
   checks.push({ label: 'platform', ok: true, value: `${platform} ${release} (${arch})` });
 
-  const failed = checks.filter((c) => !c.ok);
+  const checksWithRemediation = checks.map(addRemediation);
+  const failed = checksWithRemediation.filter((c) => !c.ok);
   return {
-    checks,
+    checks: checksWithRemediation,
     failed,
     ok: failed.length === 0,
     paths,
@@ -349,41 +388,55 @@ function parseDoctorArgs(args: string[]): ParsedDoctorArgs {
 
   return {
     watch: args.includes('--watch'),
+    json: args.includes('--json'),
+    strict: args.includes('--strict'),
     intervalSeconds: readSeconds('--interval', 5),
     failAfterSeconds: readSeconds('--fail-after', 30)
   };
 }
 
-function printDoctorHelp(): void {
-  console.log(`Usage: deckagent doctor [--watch] [--interval <sec>] [--fail-after <sec>]
+function printDoctorHelp(output: Output = console): void {
+  output.log(`Usage: deckagent doctor [--json] [--strict] [--watch] [--interval <sec>] [--fail-after <sec>]
 
 Options:
+  --json              Print a machine-readable report with a checks array
+  --strict            In one-shot mode, exit 1 when any check fails
   --watch              Continuously check DeckAgent health
   --interval <sec>     Seconds between checks in watch mode (default 5)
   --fail-after <sec>   Exit 1 after this many unhealthy seconds (default 30)
 `);
 }
 
-function printOneShotReport(report: DoctorReport): void {
-  console.log('\n🩺 DeckAgent Doctor\n');
-  console.log('Checking your DeckAgent environment...\n');
+function printOneShotReport(report: DoctorReport, output: Output = console): void {
+  const colorEnabled = supportsColor(output);
+  output.log('');
+  output.log(sectionTitle('DeckAgent Doctor', colorEnabled));
+  output.log('');
+  output.log('Checking your DeckAgent environment...');
+  output.log('');
 
   // Find longest label for alignment
   const maxLabel = Math.max(...report.checks.map((c) => c.label.length));
 
   for (const check of report.checks) {
     const icon = check.ok ? greenCheck() : redCross();
+    const status = statusText(check.ok ? 'pass' : 'fail', colorEnabled);
     const label = check.label.padEnd(maxLabel);
     const detail = check.value ?? check.message ?? '';
-    console.log(`${icon}  ${label}  ${detail}`);
+    output.log(`${icon}  ${status}  ${label}  ${detail}`);
+    if (!check.ok && check.remediation) {
+      output.log(`      Fix: ${check.remediation}`);
+    }
   }
 
-  console.log('');
+  output.log('');
   if (report.failed.length === 0) {
-    console.log('All checks passed. DeckAgent looks healthy!\n');
+    output.log('All checks passed. DeckAgent looks healthy!');
   } else {
-    console.log(`${report.failed.length} check(s) failed. See details above.\n`);
+    output.log(`${report.failed.length} check(s) failed. See Fix lines above.`);
+    output.log(`Next command: ${commandLine('deckagent doctor --json', colorEnabled)}`);
   }
+  output.log('');
 }
 
 function defaultSleep(ms: number): Promise<void> {
@@ -468,9 +521,10 @@ export async function runDoctorWatch(options: DoctorWatchOptions = {}): Promise<
   }
 }
 
-export async function runDoctor(args: string[] = []): Promise<number> {
+export async function runDoctor(args: string[] = [], options: DoctorCommandOptions = {}): Promise<number> {
+  const output = options.output ?? console;
   if (args.includes('--help') || args.includes('-h')) {
-    printDoctorHelp();
+    printDoctorHelp(output);
     return 0;
   }
 
@@ -478,21 +532,35 @@ export async function runDoctor(args: string[] = []): Promise<number> {
   try {
     parsed = parseDoctorArgs(args);
   } catch (err) {
-    console.error(err instanceof Error ? err.message : String(err));
-    printDoctorHelp();
+    output.error(err instanceof Error ? err.message : String(err));
+    printDoctorHelp(output);
     return 1;
   }
 
   if (parsed.watch) {
+    if (parsed.json) {
+      output.error('--json cannot be combined with --watch.');
+      printDoctorHelp(output);
+      return 1;
+    }
     return runDoctorWatch({
+      baseDir: options.baseDir,
       intervalSeconds: parsed.intervalSeconds,
-      failAfterSeconds: parsed.failAfterSeconds
+      failAfterSeconds: parsed.failAfterSeconds,
+      now: options.now,
+      output
     });
   }
 
   const report = await collectDoctorResults({
-    intervalSeconds: parsed.intervalSeconds
+    baseDir: options.baseDir,
+    intervalSeconds: parsed.intervalSeconds,
+    now: options.now
   });
-  printOneShotReport(report);
-  return 0;
+  if (parsed.json) {
+    output.log(JSON.stringify(report, null, 2));
+  } else {
+    printOneShotReport(report, output);
+  }
+  return parsed.strict && !report.ok ? 1 : 0;
 }

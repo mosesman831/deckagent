@@ -254,8 +254,29 @@ async function testOnboardRunsCompactSmoke() {
   });
 }
 
+async function testOnboardHumanOutputShowsSectionsAndFailureHints() {
+  await withTempDir(async (baseDir) => {
+    writeHealthyState(baseDir);
+    const output = outputCapture();
+    const code = await runOnboardCommand(['--skip-smoke'], {
+      baseDir,
+      fetch: onboardFetch([], { healthOk: false }),
+      now: () => Date.parse(nowIso),
+      output
+    });
+    assert.equal(code, 1);
+    const text = [...output.lines, ...output.errors].join('\n');
+    assert.match(text, /== DeckAgent Onboard ==/);
+    assert.match(text, /== Readiness checks ==/);
+    assert.match(text, /Hint: The Worker \/health endpoint should answer/);
+    assert.match(text, /Next: deckagent setup/);
+    assert.match(text, /== Next commands ==/);
+  });
+}
+
 await testOnboardPassesWithSkipSmoke();
 await testOnboardWarnsButDoesNotFailOnEmptyTrustedDirectories();
 await testOnboardFailsOnWorkerHealth();
 await testOnboardRunsCompactSmoke();
+await testOnboardHumanOutputShowsSectionsAndFailureHints();
 console.log('All onboard tests passed.');

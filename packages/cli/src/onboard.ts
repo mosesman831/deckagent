@@ -11,6 +11,7 @@ import {
   type Policy
 } from './configure.js';
 import { runSmokeMatrix, type SmokeReport } from './smoke.js';
+import { commandLine, sectionTitle, statusText, supportsColor, type Output } from './ux.js';
 
 type FetchLike = (
   input: string | URL,
@@ -20,8 +21,6 @@ type FetchLike = (
     body?: string;
   }
 ) => Promise<Response>;
-
-type Output = Pick<typeof console, 'log' | 'error'>;
 
 const HealthFileSchema = z.object({
   ok: z.boolean(),
@@ -63,6 +62,8 @@ export interface OnboardCheck {
   label: string;
   status: 'pass' | 'fail' | 'warn' | 'skip';
   detail?: string;
+  hint?: string;
+  next_command?: string;
 }
 
 export interface OnboardNextActions {
@@ -132,9 +133,17 @@ function check(
   id: string,
   label: string,
   status: OnboardCheck['status'],
-  detail?: string
+  detail?: string,
+  remediation?: Pick<OnboardCheck, 'hint' | 'next_command'>
 ): OnboardCheck {
-  return detail ? { id, label, status, detail } : { id, label, status };
+  return {
+    id,
+    label,
+    status,
+    ...(detail ? { detail } : {}),
+    ...(remediation?.hint ? { hint: remediation.hint } : {}),
+    ...(remediation?.next_command ? { next_command: remediation.next_command } : {})
+  };
 }
 
 function errorMessage(err: unknown): string {
@@ -299,6 +308,60 @@ function nextActions(config: Config | null): OnboardNextActions {
   };
 }
 
+function onboardRemediation(id: string): Pick<OnboardCheck, 'hint' | 'next_command'> {
+  switch (id) {
+    case 'config':
+      return {
+        hint: 'DeckAgent needs ~/.deckagent/config.json before it can connect to your Worker.',
+        next_command: 'deckagent setup'
+      };
+    case 'policy':
+      return {
+        hint: 'Create or repair policy.json so local tools know which paths and capabilities are allowed.',
+        next_command: 'deckagent policy set-profile strict'
+      };
+    case 'daemon_health':
+      return {
+        hint: 'The daemon must be running and writing a fresh health.json before web connectors can reach your machine.',
+        next_command: 'deckagent daemon --foreground'
+      };
+    case 'worker_health':
+      return {
+        hint: 'The Worker /health endpoint should answer before connector setup.',
+        next_command: 'deckagent setup'
+      };
+    case 'mcp_initialize':
+      return {
+        hint: 'Bearer authentication or device routing failed during MCP initialize.',
+        next_command: 'deckagent token rotate --deploy'
+      };
+    case 'smoke':
+      return {
+        hint: 'Run the full smoke matrix to see the exact MCP step that failed.',
+        next_command: 'deckagent smoke --profile mcpplayground'
+      };
+    default:
+      return {
+        hint: 'Fix the failed setup step, then rerun onboard.',
+        next_command: 'deckagent onboard'
+      };
+  }
+}
+
+function addFailedStepHints(checks: OnboardCheck[]): OnboardCheck[] {
+  return checks.map((result) => {
+    if (result.status !== 'fail') {
+      return result;
+    }
+    const remediation = onboardRemediation(result.id);
+    return {
+      ...result,
+      hint: result.hint ?? remediation.hint,
+      next_command: result.next_command ?? remediation.next_command
+    };
+  });
+}
+
 export async function collectOnboardReport(options: OnboardCollectOptions = {}): Promise<OnboardReport> {
   const paths = pathsForBaseDir(options.baseDir);
   const checks: OnboardCheck[] = [];
@@ -372,11 +435,12 @@ export async function collectOnboardReport(options: OnboardCollectOptions = {}):
             smoke.ok ? `${smoke.steps.filter((result) => result.status === 'pass').length} step(s) passed` : `${smoke.failed.length} step(s) failed`
           )
         );
-        const failed = checks.filter((result) => result.status === 'fail');
-        const warnings = checks.filter((result) => result.status === 'warn');
+        const checksWithHints = addFailedStepHints(checks);
+        const failed = checksWithHints.filter((result) => result.status === 'fail');
+        const warnings = checksWithHints.filter((result) => result.status === 'warn');
         return {
           ok: failed.length === 0,
-          checks,
+          checks: checksWithHints,
           failed,
           warnings,
           paths,
@@ -389,11 +453,12 @@ export async function collectOnboardReport(options: OnboardCollectOptions = {}):
     }
   }
 
-  const failed = checks.filter((result) => result.status === 'fail');
-  const warnings = checks.filter((result) => result.status === 'warn');
+  const checksWithHints = addFailedStepHints(checks);
+  const failed = checksWithHints.filter((result) => result.status === 'fail');
+  const warnings = checksWithHints.filter((result) => result.status === 'warn');
   return {
     ok: failed.length === 0,
-    checks,
+    checks: checksWithHints,
     failed,
     warnings,
     paths,
@@ -430,14 +495,23 @@ Worker /health, MCP initialize, and a compact MCP smoke test.
 }
 
 function printOnboardReport(report: OnboardReport, output: Output): void {
-  output.log('DeckAgent onboard checklist');
+  const colorEnabled = supportsColor(output);
+  output.log(sectionTitle('DeckAgent Onboard', colorEnabled));
   output.log('');
+  output.log(sectionTitle('Readiness checks', colorEnabled));
   for (const result of report.checks) {
-    const mark = result.status.toUpperCase().padEnd(4);
+    const mark = statusText(result.status, colorEnabled);
     const detail = result.detail ? `  ${result.detail}` : '';
     output.log(`${mark}  ${result.label}${detail}`);
+    if (result.status === 'fail' && result.hint) {
+      output.log(`      Hint: ${result.hint}`);
+    }
+    if (result.status === 'fail' && result.next_command) {
+      output.log(`      Next: ${commandLine(result.next_command, colorEnabled)}`);
+    }
   }
   output.log('');
+  output.log(sectionTitle('Summary', colorEnabled));
   if (report.warnings.length > 0) {
     output.log(`Warnings: ${report.warnings.length}`);
   }
@@ -447,12 +521,12 @@ function printOnboardReport(report: OnboardReport, output: Output): void {
     output.error(`Onboard FAIL: ${report.failed.length} check(s) failed.`);
   }
   output.log('');
-  output.log('Next actions:');
-  output.log(`  ${report.next_actions.ui}`);
+  output.log(sectionTitle('Next commands', colorEnabled));
+  output.log(`  ${commandLine(report.next_actions.ui, colorEnabled)}`);
   if (report.next_actions.connector_url) {
     output.log(`  Connector URL: ${report.next_actions.connector_url}`);
   }
-  output.log(`  ${report.next_actions.workspace}`);
+  output.log(`  ${commandLine(report.next_actions.workspace, colorEnabled)}`);
 }
 
 export async function runOnboardCommand(args: string[] = [], options: OnboardCommandOptions = {}): Promise<number> {

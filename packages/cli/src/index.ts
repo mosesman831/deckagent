@@ -42,39 +42,59 @@ function printHelp(): void {
   console.log(`DeckAgent CLI v${getVersion()}
 
 Usage:
-  deckagent setup              Run the full setup wizard
-  deckagent daemon [--foreground]  Start the desktop daemon (background by default)
-  deckagent daemon --stop      Stop the desktop daemon
-  deckagent daemon --status    Check if the daemon is running
-  deckagent logs [--follow] [--lines N]  Tail daemon logs (follows on TTY by default)
-  deckagent tunnel [--name NAME] [--url URL]  Cloudflare Tunnel to local wrangler (dev)
-  deckagent device list        List registered devices from the Worker
-  deckagent device prefer <id> Set sticky preferred device
-  deckagent device revoke <id> [--yes]  Revoke a device on the Worker
-  deckagent device clear       Clear sticky preferred device
-  deckagent token rotate [--deploy]  Rotate the Worker Bearer API token
-  deckagent onboard [--skip-smoke] [--json]  Verify local setup and connector readiness
-  deckagent smoke [--profile mcpplayground|cursor|claude-desktop] [--base-url URL] [--token TOKEN]
-                              Run an MCP JSON-RPC smoke matrix against the Worker
-  deckagent workspace use <path>  Set active workspace (project scope)
-  deckagent workspace status   Show current workspace
-  deckagent workspace clear    Clear workspace from config
-  deckagent secret set <NAME>  Store a secret (prompt or stdin)
-  deckagent secret list        List secret names
-  deckagent secret delete <NAME>  Delete a secret
-  deckagent policy show        Show effective policy
-  deckagent policy set-profile <strict|dev|locked>  Apply security profile
-  deckagent policy trust <path>   Add trusted directory
-  deckagent policy deny <path>    Add denied directory
-  deckagent policy lock|unlock    Lock policy / create UI unlock token
-  deckagent plugin list        List custom tool plugins
-  deckagent plugin hash <name> Print plugin entry sha256 for pinning
-  deckagent ui                 Open local control UI (http://127.0.0.1:9150)
-  deckagent doctor [--watch]   Check DeckAgent health and prerequisites
-  deckagent uninstall [--dry-run] [--keep-config] [--keep-logs] [--delete-worker] [--unregister-device] [--yes]
-                               Stop daemon and safely remove local state
-  deckagent version            Print version
-  deckagent help               Print this help message
+  deckagent <command> [options]
+
+Setup:
+  setup                         Run the full setup wizard
+  onboard [--skip-smoke] [--json]
+                                Verify local setup and connector readiness
+  workspace use <path>          Set active workspace (project scope)
+  workspace status              Show current workspace
+  workspace clear               Clear workspace from config
+
+Operate:
+  daemon [--foreground]         Start the desktop daemon (background by default)
+  daemon --stop                 Stop the desktop daemon
+  daemon --status               Check if the daemon is running
+  logs [--follow] [--lines N]   Tail daemon logs (follows on TTY by default)
+  ui                            Open local control UI (http://127.0.0.1:9150)
+  tunnel [--name NAME] [--url URL]
+                                Cloudflare Tunnel to local wrangler (dev)
+
+Security:
+  token rotate [--deploy]       Rotate the Worker Bearer API token
+  policy show                   Show effective policy
+  policy set-profile <strict|dev|locked>
+                                Apply security profile
+  policy trust <path>           Add trusted directory
+  policy deny <path>            Add denied directory
+  policy lock|unlock            Lock policy / create UI unlock token
+  secret set <NAME>             Store a secret (prompt or stdin)
+  secret list                   List secret names
+  secret delete <NAME>          Delete a secret
+  device list                   List registered devices from the Worker
+  device prefer <id>            Set sticky preferred device
+  device revoke <id> [--yes]    Revoke a device on the Worker
+  device clear                  Clear sticky preferred device
+  plugin list                   List custom tool plugins
+  plugin hash <name>            Print plugin entry sha256 for pinning
+
+Troubleshoot:
+  doctor [--json] [--strict] [--watch]
+                                Check DeckAgent health and prerequisites
+  smoke [--profile mcpplayground|cursor|claude-desktop] [--base-url URL] [--token TOKEN]
+                                Run an MCP JSON-RPC smoke matrix against the Worker
+  uninstall [--dry-run] [--keep-config] [--keep-logs] [--delete-worker] [--unregister-device] [--yes]
+                                Stop daemon and safely remove local state
+  version                       Print version
+  help                          Print this help message
+
+Examples:
+  deckagent setup
+  deckagent onboard
+  deckagent ui
+  deckagent doctor --strict
+  deckagent smoke --profile mcpplayground
 `);
 }
 

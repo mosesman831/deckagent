@@ -12,6 +12,7 @@ import {
   type Config,
   type Policy
 } from './configure.js';
+import { commandLine, sectionTitle, statusText, supportsColor, type Output } from './ux.js';
 
 type FetchLike = (
   input: string | URL,
@@ -21,8 +22,6 @@ type FetchLike = (
     body?: string;
   }
 ) => Promise<Response>;
-
-type Output = Pick<typeof console, 'log' | 'error'>;
 
 const SmokeProfileSchema = z.enum(['mcpplayground', 'cursor', 'claude-desktop']);
 export type SmokeProfileName = z.infer<typeof SmokeProfileSchema>;
@@ -63,6 +62,8 @@ export interface SmokeStepResult {
   step: string;
   status: 'pass' | 'fail' | 'skip';
   detail?: string;
+  hint?: string;
+  next_command?: string;
 }
 
 export interface SmokeReport {
@@ -279,6 +280,57 @@ function step(
   return detail ? { profile, step: stepName, status, detail } : { profile, step: stepName, status };
 }
 
+function smokeRemediation(result: SmokeStepResult): Pick<SmokeStepResult, 'hint' | 'next_command'> {
+  if (result.step === 'initialize') {
+    return {
+      hint: 'The Worker /mcp endpoint must accept the configured Bearer token.',
+      next_command: 'deckagent token rotate --deploy'
+    };
+  }
+  if (result.step === 'tools/list') {
+    return {
+      hint: 'The Worker should expose the static catalog and proxy daemon tools when the device is online.',
+      next_command: 'deckagent doctor --strict'
+    };
+  }
+  if (result.step === 'resources/list' || result.step.startsWith('resources/read')) {
+    return {
+      hint: 'Resource calls validate Worker JSON-RPC routing and static DeckAgent metadata.',
+      next_command: 'deckagent smoke --profile mcpplayground'
+    };
+  }
+  if (result.step === 'prompts/list') {
+    return {
+      hint: 'Prompt catalog metadata may be stale or missing from the deployed Worker.',
+      next_command: 'deckagent setup'
+    };
+  }
+  if (result.step.startsWith('tools/call')) {
+    return {
+      hint: 'Tool calls require a reachable daemon plus a workspace or trusted directory when filesystem tools run.',
+      next_command: 'deckagent daemon --foreground'
+    };
+  }
+  return {
+    hint: 'Fix the failed smoke step, then rerun the matrix.',
+    next_command: 'deckagent smoke'
+  };
+}
+
+function addFailedStepHints(steps: SmokeStepResult[]): SmokeStepResult[] {
+  return steps.map((result) => {
+    if (result.status !== 'fail') {
+      return result;
+    }
+    const remediation = smokeRemediation(result);
+    return {
+      ...result,
+      hint: result.hint ?? remediation.hint,
+      next_command: result.next_command ?? remediation.next_command
+    };
+  });
+}
+
 function resourceReadUri(resources: unknown[]): string {
   const records = resources.map(asRecord).filter((value): value is Record<string, unknown> => value !== null);
   const about = records.find((resource) => resource.uri === 'deckagent://about');
@@ -472,15 +524,16 @@ export async function runSmokeMatrix(options: SmokeMatrixOptions): Promise<Smoke
     );
   }
 
-  const failed = steps.filter((result) => result.status === 'fail');
-  const skipped = steps.filter((result) => result.status === 'skip');
+  const stepsWithHints = addFailedStepHints(steps);
+  const failed = stepsWithHints.filter((result) => result.status === 'fail');
+  const skipped = stepsWithHints.filter((result) => result.status === 'skip');
   return {
     ok: failed.length === 0,
     baseUrl: options.baseUrl,
     mcpUrl,
     profiles,
     daemonLikelyOnline: options.daemonLikelyOnline ?? false,
-    steps,
+    steps: stepsWithHints,
     failed,
     skipped
   };
@@ -527,7 +580,10 @@ Defaults read worker_url and api_token from ~/.deckagent/config.json.
 }
 
 export function printSmokeReport(report: SmokeReport, output: Output = console): void {
-  output.log('DeckAgent MCP smoke');
+  const colorEnabled = supportsColor(output);
+  output.log(sectionTitle('DeckAgent MCP Smoke', colorEnabled));
+  output.log('');
+  output.log(sectionTitle('Target', colorEnabled));
   output.log(`URL: ${report.mcpUrl}`);
   output.log(`Profiles: ${report.profiles.join(', ')}`);
   output.log(`Daemon checks: ${report.daemonLikelyOnline ? 'enabled' : 'skipped (daemon not likely online)'}`);
@@ -537,18 +593,26 @@ export function printSmokeReport(report: SmokeReport, output: Output = console):
   for (const result of report.steps) {
     if (result.profile !== currentProfile) {
       currentProfile = result.profile;
-      output.log(`[${currentProfile}]`);
+      output.log(sectionTitle(`Profile: ${currentProfile}`, colorEnabled));
     }
-    const mark = result.status.toUpperCase().padEnd(4);
+    const mark = statusText(result.status, colorEnabled);
     const detail = result.detail ? `  (${result.detail})` : '';
     output.log(`  ${mark}  ${result.step}${detail}`);
+    if (result.status === 'fail' && result.hint) {
+      output.log(`        Hint: ${result.hint}`);
+    }
+    if (result.status === 'fail' && result.next_command) {
+      output.log(`        Next: ${commandLine(result.next_command, colorEnabled)}`);
+    }
   }
 
   output.log('');
+  output.log(sectionTitle('Summary', colorEnabled));
   if (report.ok) {
     output.log('Smoke PASS.');
   } else {
     output.error(`Smoke FAIL: ${report.failed.length} step(s) failed.`);
+    output.log(`Next command: ${commandLine('deckagent doctor --strict', colorEnabled)}`);
   }
 }
 
