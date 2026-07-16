@@ -1,6 +1,6 @@
 # DeckAgent — Production Readiness Spec (P0–P2)
 
-> Status: **P0/P1 implemented; P2 partial** (`PR2.1`, `PR2.3`, and `PR2.4` implemented; `PR2.2` and `PR2.5` remain pending)
+> Status: **IMPLEMENTED** (P0–P2 complete on `cursor/production-readiness-cd98`)  
 > Goal: Close remaining gaps so DeckAgent is honestly “production-ready” for self-hosted operators.  
 > Assumes Waves 2–4 and F1–F10 are already on branch.
 
@@ -396,9 +396,9 @@ All **P0 / P1 / P2** items from the production audit. Fully implement (not stub)
 - [x] CI uses ci + pack smoke
 - [x] SPEC.md + README + SECURITY + CHANGELOG accurate
 - [x] token rotation CLI + Bearer-only operator guide
-- [ ] metrics endpoint/file exists
+- [x] metrics endpoint/file exists
 - [x] release workflow present
-- [ ] abort signal for long tools exists
+- [x] abort signal for long tools exists
 
 ---
 
