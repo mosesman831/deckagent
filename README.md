@@ -289,3 +289,7 @@ Five packages in an npm workspace:
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Roadmap
+
+Next feature wave (workspaces, MCP resources, snapshots/undo, secrets vault, control UI, budgets) is specified in [`docs/WAVE3_FEATURE_SPEC.md`](docs/WAVE3_FEATURE_SPEC.md).
