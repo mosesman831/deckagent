@@ -12,6 +12,7 @@ import {
   setSnapshotRetention,
   resetSnapshotRetention,
   createSnapshotBeforeMutation,
+  setJobsDirForTest,
 } from "./src/index.js";
 import type { ToolResponse } from "./src/schemas.js";
 import { ExecuteCommandArgsSchema } from "./src/schemas.js";
@@ -53,6 +54,10 @@ async function main() {
     "execute_command_stream",
     "list_processes",
     "kill_process",
+    "start_job",
+    "list_jobs",
+    "get_job",
+    "cancel_job",
     "browser_navigate",
     "browser_screenshot",
     "browser_click",
@@ -68,6 +73,7 @@ async function main() {
   await fs.mkdir(TEST_ROOT, { recursive: true });
   await fs.mkdir(SNAPSHOTS_ROOT, { recursive: true });
   setSnapshotsDir(SNAPSHOTS_ROOT);
+  setJobsDirForTest(path.join(TEST_ROOT, "jobs"));
 
   // get_environment
   {
@@ -297,6 +303,64 @@ async function main() {
     console.log("✓ execute_command");
   }
 
+  // background jobs: start echo, inspect output, cancel sleep
+  {
+    const startRes = await registry.execute("start_job", {
+      command: "echo job-hi",
+      cwd: TEST_ROOT,
+    });
+    assert(!startRes.isError, `start_job failed: ${textOf(startRes)}`);
+    const started = JSON.parse(textOf(startRes)) as { job_id: string };
+    assert(typeof started.job_id === "string", "start_job returns job_id");
+
+    let jobText = "";
+    for (let i = 0; i < 20; i++) {
+      const getRes = await registry.execute("get_job", {
+        job_id: started.job_id,
+        tail_lines: 20,
+      });
+      assert(!getRes.isError, `get_job failed: ${textOf(getRes)}`);
+      jobText = textOf(getRes);
+      const job = JSON.parse(jobText) as { status: string; stdout: string };
+      if (job.status === "completed" && job.stdout.includes("job-hi")) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    const completed = JSON.parse(jobText) as { status: string; stdout: string };
+    assert(completed.status === "completed", "echo job completed");
+    assert(completed.stdout.includes("job-hi"), "get_job includes stdout tail");
+
+    const sleepStart = await registry.execute("start_job", {
+      command: "sleep 30",
+      cwd: TEST_ROOT,
+      timeout_ms: 30_000,
+    });
+    assert(!sleepStart.isError, `start sleep job failed: ${textOf(sleepStart)}`);
+    const sleepJob = JSON.parse(textOf(sleepStart)) as { job_id: string };
+    const cancelRes = await registry.execute("cancel_job", { job_id: sleepJob.job_id });
+    assert(!cancelRes.isError, `cancel_job failed: ${textOf(cancelRes)}`);
+
+    let cancelledText = "";
+    for (let i = 0; i < 20; i++) {
+      const getRes = await registry.execute("get_job", {
+        job_id: sleepJob.job_id,
+        tail_lines: 5,
+      });
+      assert(!getRes.isError, `get cancelled job failed: ${textOf(getRes)}`);
+      cancelledText = textOf(getRes);
+      const job = JSON.parse(cancelledText) as { status: string };
+      if (job.status === "cancelled") break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    const cancelled = JSON.parse(cancelledText) as { status: string };
+    assert(cancelled.status === "cancelled", "sleep job cancelled");
+
+    const listRes = await registry.execute("list_jobs", {});
+    assert(!listRes.isError, `list_jobs failed: ${textOf(listRes)}`);
+    const listed = JSON.parse(textOf(listRes)) as { count: number };
+    assert(listed.count >= 2, "list_jobs includes tracked jobs");
+    console.log("✓ background jobs");
+  }
+
   // execute_command abort signal (best-effort)
   {
     const controller = new AbortController();
@@ -497,6 +561,7 @@ async function main() {
   }
 
   await fs.rm(TEST_ROOT, { recursive: true, force: true });
+  setJobsDirForTest(null);
   console.log("\nAll smoke tests passed.");
 }
 

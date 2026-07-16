@@ -191,6 +191,77 @@ export const TOOL_CATALOG: McpToolDefinition[] = [
     },
   },
   {
+    name: "start_job",
+    description:
+      "Start a tracked background shell job and return immediately with a job id. Requires confirmation by default.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        command: { type: "string" },
+        cwd: {
+          type: "string",
+          description: "Optional working directory for the job",
+        },
+        timeout_ms: {
+          type: "number",
+          default: 1800000,
+          maximum: 1800000,
+          description: "Maximum runtime in milliseconds (default/cap 30 minutes)",
+        },
+        env: { type: "object", additionalProperties: { type: "string" } },
+        use_secrets: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional vault secret names to inject into the child env (explicit; none by default)",
+        },
+      },
+      required: ["command"],
+    },
+  },
+  {
+    name: "list_jobs",
+    description: "List tracked background jobs, optionally filtered by status.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        status: {
+          type: "string",
+          enum: ["running", "completed", "failed", "cancelled", "timed_out"],
+        },
+      },
+    },
+  },
+  {
+    name: "get_job",
+    description: "Get background job status and tail stdout/stderr logs.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        job_id: { type: "string", description: "Job id returned by start_job" },
+        tail_lines: {
+          type: "number",
+          default: 200,
+          maximum: 5000,
+          description: "Number of stdout/stderr tail lines to return",
+        },
+      },
+      required: ["job_id"],
+    },
+  },
+  {
+    name: "cancel_job",
+    description:
+      "Cancel a running background job with SIGTERM, followed by SIGKILL if needed. Requires confirmation by default.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        job_id: { type: "string", description: "Job id returned by start_job" },
+      },
+      required: ["job_id"],
+    },
+  },
+  {
     name: "browser_navigate",
     description:
       "Open a URL in the browser. Requires browser automation to be enabled.",

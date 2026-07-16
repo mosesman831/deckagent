@@ -1,6 +1,8 @@
 import { z } from "zod";
 
 const PositiveInt = z.number().int().positive();
+export const JOB_TIMEOUT_DEFAULT_MS = 30 * 60 * 1000;
+export const JOB_TIMEOUT_MAX_MS = 30 * 60 * 1000;
 
 export const ReadFileArgsSchema = z.object({
   path: z.string(),
@@ -88,6 +90,44 @@ export const KillProcessArgsSchema = z.object({
   signal: z.string().optional().default("SIGTERM"),
 });
 
+export const JobStatusSchema = z.enum([
+  "running",
+  "completed",
+  "failed",
+  "cancelled",
+  "timed_out",
+]);
+
+export const StartJobArgsSchema = z.object({
+  command: z.string().min(1),
+  cwd: z.string().optional(),
+  timeout_ms: z
+    .number()
+    .int()
+    .positive()
+    .max(JOB_TIMEOUT_MAX_MS)
+    .optional()
+    .default(JOB_TIMEOUT_DEFAULT_MS),
+  env: z.record(z.string()).optional(),
+  /** Secret names for the daemon to inject into env before spawn; handlers ignore this field. */
+  use_secrets: z.array(z.string()).optional(),
+  /** Hidden daemon-only execution context for terminal_mode=sandbox_fs. */
+  _sandbox: TerminalSandboxPlanSchema.optional(),
+});
+
+export const ListJobsArgsSchema = z.object({
+  status: JobStatusSchema.optional(),
+});
+
+export const GetJobArgsSchema = z.object({
+  job_id: z.string().uuid(),
+  tail_lines: z.number().int().min(1).max(5000).optional().default(200),
+});
+
+export const CancelJobArgsSchema = z.object({
+  job_id: z.string().uuid(),
+});
+
 export const BrowserNavigateArgsSchema = z.object({
   url: z.string(),
   headless: z.boolean().optional().default(true),
@@ -129,6 +169,11 @@ export type ExecuteCommandArgs = z.infer<typeof ExecuteCommandArgsSchema>;
 export type ExecuteCommandStreamArgs = z.infer<typeof ExecuteCommandStreamArgsSchema>;
 export type ListProcessesArgs = z.infer<typeof ListProcessesArgsSchema>;
 export type KillProcessArgs = z.infer<typeof KillProcessArgsSchema>;
+export type JobStatus = z.infer<typeof JobStatusSchema>;
+export type StartJobArgs = z.infer<typeof StartJobArgsSchema>;
+export type ListJobsArgs = z.infer<typeof ListJobsArgsSchema>;
+export type GetJobArgs = z.infer<typeof GetJobArgsSchema>;
+export type CancelJobArgs = z.infer<typeof CancelJobArgsSchema>;
 export type BrowserNavigateArgs = z.infer<typeof BrowserNavigateArgsSchema>;
 export type BrowserScreenshotArgs = z.infer<typeof BrowserScreenshotArgsSchema>;
 export type BrowserClickArgs = z.infer<typeof BrowserClickArgsSchema>;

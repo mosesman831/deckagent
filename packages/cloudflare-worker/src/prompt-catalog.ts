@@ -53,7 +53,7 @@ You are operating on their real hardware under their \`~/.deckagent/policy.json\
 1. \`get_environment()\` — learn OS, home, shell.
 2. \`list_directory\` / \`search_files\` — orient in the project.
 3. \`read_file\` before edits; prefer \`edit_file\` for surgical changes.
-4. \`execute_command\` for builds/tests (respect timeouts; default 60s).
+4. \`execute_command\` for short builds/tests; use \`start_job\` + \`get_job\` for long-running commands.
 5. Browser tools only if policy \`allow_browser\` is on and Playwright Chromium is installed.
 
 ## Policy error codes
@@ -63,7 +63,7 @@ You are operating on their real hardware under their \`~/.deckagent/policy.json\
 - \`TOOL_TIMEOUT\` — shorten the command or raise timeout when allowed
 
 ## Available tool categories
-Filesystem (including list_snapshots / restore_snapshot for undo), terminal (execute_command, execute_command_stream with optional use_secrets, processes), browser (optional), get_environment. For long-running shell output, prefer execute_command_stream (SSE when the client Accepts text/event-stream).
+Filesystem (including list_snapshots / restore_snapshot for undo), terminal (execute_command, execute_command_stream with optional use_secrets, background jobs, processes), browser (optional), get_environment. For long-running shell output, prefer start_job/get_job; use execute_command_stream when the client Accepts text/event-stream and live output is needed.
 
 Act like a pair programmer with hands on their machine — careful, concrete, and policy-aware.`;
 
@@ -153,7 +153,7 @@ export function getPromptMessages(
               `${DECKAGENT_SYSTEM_TEXT}\n\n## Mode: safe explore\n` +
               "For this session prefer: get_environment, list_directory, read_file, " +
               "search_files, get_file_info, read_multiple_files. Avoid write_file, " +
-              "edit_file, move_file, execute_command, kill_process unless the user " +
+              "edit_file, move_file, execute_command, start_job, cancel_job, kill_process unless the user " +
               "explicitly asks.",
           },
         },

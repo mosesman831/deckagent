@@ -361,7 +361,11 @@ export class ToolExecutor {
 
       // Inject vault secrets into env for terminal tools (vault wins over user env).
       let execArgs = resolvedArgs;
-      if (tool === "execute_command" || tool === "execute_command_stream") {
+      if (
+        tool === "execute_command" ||
+        tool === "execute_command_stream" ||
+        tool === "start_job"
+      ) {
         const injected = applySecretInjection(
           resolvedArgs,
           this.policy.allow_secret_injection,
@@ -410,6 +414,7 @@ export class ToolExecutor {
           }
           return this.toolRegistry.execute(tool, execArgs, {
             signal: controller.signal,
+            onShellSeconds: recordShellSeconds,
           });
         };
 
@@ -459,7 +464,9 @@ export class ToolExecutor {
     } finally {
       // Audit uses original resolved args (with use_secrets names) — never secret values.
       const auditArgs =
-        tool === "execute_command" || tool === "execute_command_stream"
+        tool === "execute_command" ||
+        tool === "execute_command_stream" ||
+        tool === "start_job"
           ? {
               ...resolvedArgs,
               // Ensure env in audit does not contain vault values if somehow present

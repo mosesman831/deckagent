@@ -37,7 +37,7 @@ import {
 import { SOFT_TOOL_ERROR_CODES } from "./src/errors.js";
 
 const API_TOKEN = "test-api-token-secret";
-const EXPECTED_TOOL_COUNT = 21;
+const EXPECTED_TOOL_COUNT = 25;
 
 // Minimal in-memory KV for local message-flow testing.
 class FakeKV {
@@ -392,13 +392,22 @@ async function main() {
   assert(TOOL_NAMES.has("get_environment"), "has get_environment");
   assert(TOOL_NAMES.has("list_snapshots"), "has list_snapshots");
   assert(TOOL_NAMES.has("restore_snapshot"), "has restore_snapshot");
+  assert(TOOL_NAMES.has("start_job"), "has start_job");
+  assert(TOOL_NAMES.has("get_job"), "has get_job");
+  assert(TOOL_NAMES.has("cancel_job"), "has cancel_job");
   const execCmd = TOOL_CATALOG.find((t) => t.name === "execute_command");
   const execStream = TOOL_CATALOG.find((t) => t.name === "execute_command_stream");
+  const startJob = TOOL_CATALOG.find((t) => t.name === "start_job");
+  const getJob = TOOL_CATALOG.find((t) => t.name === "get_job");
   const execProps = (execCmd?.inputSchema as { properties?: Record<string, unknown> })
     ?.properties;
   const streamProps = (
     execStream?.inputSchema as { properties?: Record<string, unknown> }
   )?.properties;
+  const startJobProps = (
+    startJob?.inputSchema as { properties?: Record<string, unknown> }
+  )?.properties;
+  const getJobRequired = (getJob?.inputSchema as { required?: string[] })?.required;
   assert(
     execProps?.use_secrets !== undefined,
     "execute_command inputSchema has use_secrets"
@@ -407,6 +416,13 @@ async function main() {
     streamProps?.use_secrets !== undefined,
     "execute_command_stream inputSchema has use_secrets"
   );
+  assert(
+    startJobProps?.cwd !== undefined &&
+      startJobProps?.timeout_ms !== undefined &&
+      startJobProps?.use_secrets !== undefined,
+    "start_job inputSchema has cwd, timeout_ms, use_secrets"
+  );
+  assert(getJobRequired?.includes("job_id") === true, "get_job requires job_id");
   const listSnap = TOOL_CATALOG.find((t) => t.name === "list_snapshots");
   const restoreSnap = TOOL_CATALOG.find((t) => t.name === "restore_snapshot");
   const listSnapProps = (
@@ -494,6 +510,10 @@ async function main() {
       "execute_command hidden when not enabled"
     );
     assert(
+      !filtered.some((t) => t.name === "start_job"),
+      "start_job hidden when not enabled"
+    );
+    assert(
       filtered.some((t) => t.name === "get_environment"),
       "get_environment remains"
     );
@@ -528,7 +548,7 @@ async function main() {
     );
     assert(
       !afterList.some((t) =>
-        ["write_file", "edit_file", "execute_command", "restore_snapshot"].includes(
+        ["write_file", "edit_file", "execute_command", "start_job", "restore_snapshot"].includes(
           t.name
         )
       ),

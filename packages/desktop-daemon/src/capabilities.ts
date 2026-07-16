@@ -19,6 +19,10 @@ export const ALL_KNOWN_TOOLS: readonly string[] = [
   "execute_command_stream",
   "list_processes",
   "kill_process",
+  "start_job",
+  "list_jobs",
+  "get_job",
+  "cancel_job",
   "browser_navigate",
   "browser_screenshot",
   "browser_click",
@@ -52,6 +56,10 @@ export const TERMINAL_TOOLS: readonly string[] = [
   "execute_command_stream",
   "list_processes",
   "kill_process",
+  "start_job",
+  "list_jobs",
+  "get_job",
+  "cancel_job",
 ];
 
 export const BROWSER_TOOLS: readonly string[] = [

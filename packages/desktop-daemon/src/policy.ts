@@ -94,9 +94,11 @@ export const PolicySchema = z.object({
     .default("blocklist"),
   require_confirmation: z.array(z.string()).default([
     "execute_command",
+    "start_job",
     "write_file",
     "edit_file",
     "kill_process",
+    "cancel_job",
     "restore_snapshot",
   ]),
   read_only: z.boolean().default(false),
@@ -424,7 +426,7 @@ export function applyPathDefaults(
   return next;
 }
 
-const PATH_ARG_KEYS = ["path", "source", "destination", "workdir"] as const;
+const PATH_ARG_KEYS = ["path", "source", "destination", "workdir", "cwd"] as const;
 
 /**
  * Absolutize path-bearing args before policy checks.
@@ -946,7 +948,7 @@ function checkPathAllowed(
   policy: Policy,
 ): PolicyResult {
   const op: PathOp = isWritePathTool(toolName) ? "write" : "read";
-  const pathKeys = ["path", "source", "destination", "workdir"];
+  const pathKeys = ["path", "source", "destination", "workdir", "cwd"];
 
   for (const key of pathKeys) {
     const value = args[key];
@@ -954,7 +956,11 @@ function checkPathAllowed(
 
     // move_file: both source and destination checked as write (mutating)
     const keyOp: PathOp =
-      toolName === "move_file" ? "write" : key === "workdir" ? "read" : op;
+      toolName === "move_file"
+        ? "write"
+        : key === "workdir" || key === "cwd"
+          ? "read"
+          : op;
 
     const result = evaluatePathAccess(value, keyOp, policy);
     if (!result.allowed) {

@@ -14,6 +14,10 @@ import {
   ExecuteCommandStreamArgsSchema,
   ListProcessesArgsSchema,
   KillProcessArgsSchema,
+  StartJobArgsSchema,
+  ListJobsArgsSchema,
+  GetJobArgsSchema,
+  CancelJobArgsSchema,
   BrowserNavigateArgsSchema,
   BrowserScreenshotArgsSchema,
   BrowserClickArgsSchema,
@@ -42,6 +46,14 @@ import {
   kill_process,
   killAllActiveCommands,
 } from "./tools/terminal.js";
+import {
+  start_job,
+  list_jobs,
+  get_job,
+  cancel_job,
+  getJobsDir,
+  setJobsDirForTest,
+} from "./tools/background-jobs.js";
 import {
   browser_navigate,
   browser_screenshot,
@@ -76,6 +88,7 @@ export interface ToolDefinition<T = unknown> {
 
 export interface ToolExecutionContext {
   signal?: AbortSignal;
+  onShellSeconds?: (seconds: number) => void;
 }
 
 /** Erase tool argument type for heterogeneous registry storage (no `any`). */
@@ -222,6 +235,31 @@ export function createRegistry(): ToolRegistry {
       handler: kill_process,
     }),
     defineTool({
+      name: "start_job",
+      description:
+        "Start a tracked background shell job and return immediately with a job id. Use get_job to inspect output and cancel_job to stop it.",
+      inputSchema: StartJobArgsSchema,
+      handler: start_job,
+    }),
+    defineTool({
+      name: "list_jobs",
+      description: "List tracked background jobs, optionally filtered by status.",
+      inputSchema: ListJobsArgsSchema,
+      handler: list_jobs,
+    }),
+    defineTool({
+      name: "get_job",
+      description: "Get background job status and tail stdout/stderr logs.",
+      inputSchema: GetJobArgsSchema,
+      handler: get_job,
+    }),
+    defineTool({
+      name: "cancel_job",
+      description: "Cancel a running background job with SIGTERM then SIGKILL.",
+      inputSchema: CancelJobArgsSchema,
+      handler: cancel_job,
+    }),
+    defineTool({
       name: "browser_navigate",
       description: "Open a URL in the browser. Requires browser automation to be enabled.",
       inputSchema: BrowserNavigateArgsSchema,
@@ -289,6 +327,14 @@ export {
   list_processes,
   kill_process,
   killAllActiveCommands,
+};
+export {
+  start_job,
+  list_jobs,
+  get_job,
+  cancel_job,
+  getJobsDir,
+  setJobsDirForTest,
 };
 export { buildSandboxCommand } from "./tools/terminal-sandbox.js";
 export {
