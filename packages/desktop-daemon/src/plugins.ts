@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import { fork } from "node:child_process";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import {
   basename,
@@ -32,6 +33,7 @@ export interface LoadedPlugin {
   entry: string;
   require_confirmation: boolean;
   inputSchema: Record<string, unknown>;
+  integrity_status: PluginIntegrityStatus;
 }
 
 export interface PluginLoadResult {
@@ -47,8 +49,11 @@ export interface PluginListEntry {
   directory: string;
   enabled: boolean;
   require_confirmation: boolean;
+  integrity_status: PluginIntegrityStatus;
   error?: string;
 }
+
+export type PluginIntegrityStatus = "ok" | "missing" | "mismatch";
 
 type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -125,6 +130,15 @@ const PluginManifestSchema = z.object({
     "inputSchema must be a JSON Schema object schema",
   ),
   require_confirmation: z.boolean().optional().default(true),
+  integrity: z
+    .object({
+      sha256: z
+        .string()
+        .regex(/^[a-fA-F0-9]{64}$/, "sha256 must be 64 hex characters")
+        .transform((value) => value.toLowerCase()),
+    })
+    .strict()
+    .optional(),
 });
 
 const ToolContentSchema = z.union([
@@ -226,7 +240,7 @@ export async function loadPlugins(options: {
 }
 
 export async function listPlugins(options?: {
-  policy?: Pick<Policy, "allow_plugins">;
+  policy?: Pick<Policy, "allow_plugins" | "require_plugin_integrity">;
   pluginsRoot?: string;
 }): Promise<PluginListEntry[]> {
   const root = options?.pluginsRoot ?? getPluginsRoot();
@@ -257,17 +271,41 @@ export async function listPlugins(options?: {
         throw new Error("plugin.json resolves outside plugin directory");
       }
       const manifest = await readManifest(manifestReal);
+      const entryPath = resolvePath(pluginDirReal, manifest.entry);
+      const entryReal = await fs.realpath(entryPath);
+      if (!isPathInsideOrEqual(entryReal, rootReal)) {
+        throw new Error("plugin entry resolves outside plugins root");
+      }
+      const integrity_status = await getPluginIntegrityStatus(
+        manifest,
+        entryReal,
+      );
       const collision =
         ALL_KNOWN_TOOLS.includes(manifest.name) || seen.has(manifest.name);
+      const integrityError = integrityListError(
+        integrity_status,
+        !!options?.policy?.require_plugin_integrity,
+      );
       seen.add(manifest.name);
       output.push({
         name: manifest.name,
         description: manifest.description,
         version: manifest.version,
         directory: pluginDirReal,
-        enabled: !!options?.policy?.allow_plugins && !collision,
+        enabled:
+          !!options?.policy?.allow_plugins && !collision && !integrityError,
         require_confirmation: manifest.require_confirmation,
-        ...(collision ? { error: "tool name collides with another tool" } : {}),
+        integrity_status,
+        ...(collision || integrityError
+          ? {
+              error: [
+                collision ? "tool name collides with another tool" : null,
+                integrityError,
+              ]
+                .filter((message): message is string => !!message)
+                .join("; "),
+            }
+          : {}),
       });
     } catch (err) {
       output.push({
@@ -277,6 +315,7 @@ export async function listPlugins(options?: {
         directory: pluginDir,
         enabled: false,
         require_confirmation: true,
+        integrity_status: "missing",
         error: humanError(err),
       });
     }
@@ -317,6 +356,12 @@ async function loadOnePlugin(options: {
     if (!isPathInsideOrEqual(entryReal, options.rootReal)) {
       throw new Error("plugin entry resolves outside plugins root");
     }
+
+    const integrity_status = await verifyPluginIntegrity({
+      manifest,
+      entry: entryReal,
+      requireIntegrity: options.policy.require_plugin_integrity,
+    });
 
     const inputValidator = createZodSchemaFromJsonSchema(manifest.inputSchema);
     const timeoutMs = options.policy.max_command_timeout * 1000;
@@ -369,6 +414,7 @@ async function loadOnePlugin(options: {
       entry: entryReal,
       require_confirmation: manifest.require_confirmation,
       inputSchema: manifest.inputSchema,
+      integrity_status,
     };
   } catch (err) {
     options.logger.warn(
@@ -376,6 +422,55 @@ async function loadOnePlugin(options: {
     );
     return null;
   }
+}
+
+export async function hashFileSha256(path: string): Promise<string> {
+  const contents = await fs.readFile(path);
+  return createHash("sha256").update(contents).digest("hex");
+}
+
+async function verifyPluginIntegrity(options: {
+  manifest: PluginManifest;
+  entry: string;
+  requireIntegrity: boolean;
+}): Promise<PluginIntegrityStatus> {
+  const status = await getPluginIntegrityStatus(options.manifest, options.entry);
+  if (status === "mismatch") {
+    throw new Error(
+      `[PLUGIN_INTEGRITY_MISMATCH] Plugin '${options.manifest.name}' entry ` +
+        "hash does not match plugin.json integrity.sha256",
+    );
+  }
+  if (status === "missing" && options.requireIntegrity) {
+    throw new Error(
+      `[PLUGIN_INTEGRITY_MISSING] Plugin '${options.manifest.name}' is missing ` +
+        "plugin.json integrity.sha256 required by policy",
+    );
+  }
+  return status;
+}
+
+async function getPluginIntegrityStatus(
+  manifest: PluginManifest,
+  entry: string,
+): Promise<PluginIntegrityStatus> {
+  const expected = manifest.integrity?.sha256;
+  if (!expected) return "missing";
+  const actual = await hashFileSha256(entry);
+  return actual === expected ? "ok" : "mismatch";
+}
+
+function integrityListError(
+  status: PluginIntegrityStatus,
+  requireIntegrity: boolean,
+): string | null {
+  if (status === "mismatch") {
+    return "PLUGIN_INTEGRITY_MISMATCH";
+  }
+  if (status === "missing" && requireIntegrity) {
+    return "PLUGIN_INTEGRITY_MISSING";
+  }
+  return null;
 }
 
 async function runPluginInChild(options: {

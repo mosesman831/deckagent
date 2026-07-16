@@ -11,6 +11,10 @@ import {
   type HealthTunnelState,
 } from "./health.js";
 import { recordReconnectMetric } from "./metrics.js";
+import {
+  sendDesktopNotification,
+  type DesktopNotifier,
+} from "./notify.js";
 
 interface ExecuteToolMessage {
   type: "execute_tool";
@@ -69,6 +73,7 @@ const INITIAL_RECONNECT_DELAY_MS = 1000;
 const MAX_RECONNECT_DELAY_MS = 30000;
 const HEARTBEAT_ACK_TIMEOUT_MS = 45000;
 const HEARTBEAT_GRACE_MS = 2000;
+const DISCONNECT_NOTIFY_DEBOUNCE_MS = 60 * 1000;
 
 export class TunnelClient {
   private ws: WebSocket | null = null;
@@ -91,6 +96,11 @@ export class TunnelClient {
   private workerVersion: string | undefined;
   private protocolWarning: string | undefined;
   private healthPath: string | undefined;
+  private notifier: DesktopNotifier;
+  private now: () => number;
+  private disconnectNotifyDebounceMs: number;
+  private disconnectedSinceLastConnect = false;
+  private lastDisconnectNotifyAt: number | null = null;
 
   constructor(
     config: Config,
@@ -99,6 +109,9 @@ export class TunnelClient {
     options?: {
       getCaps?: () => PolicyCapsPayload;
       healthPath?: string;
+      notifier?: DesktopNotifier;
+      now?: () => number;
+      disconnectNotifyDebounceMs?: number;
     },
   ) {
     this.config = config;
@@ -106,6 +119,10 @@ export class TunnelClient {
     this.logger = logger;
     this.getCaps = options?.getCaps ?? null;
     this.healthPath = options?.healthPath;
+    this.notifier = options?.notifier ?? sendDesktopNotification;
+    this.now = options?.now ?? Date.now;
+    this.disconnectNotifyDebounceMs =
+      options?.disconnectNotifyDebounceMs ?? DISCONNECT_NOTIFY_DEBOUNCE_MS;
   }
 
   getState(): ConnectionState {
@@ -306,7 +323,15 @@ export class TunnelClient {
     }
 
     this.logger.info("Authentication successful");
+    const shouldNotifyReconnect = this.disconnectedSinceLastConnect;
     this.setState("connected");
+    if (shouldNotifyReconnect) {
+      this.notify(
+        "DeckAgent reconnected",
+        `Tunnel reconnected to ${this.config.worker_url}`,
+      );
+      this.disconnectedSinceLastConnect = false;
+    }
     this.pendingAuth?.resolve();
     this.pendingAuth = null;
     this.startHeartbeat();
@@ -360,6 +385,7 @@ export class TunnelClient {
   }
 
   private onClose(code: number, reason: Buffer): void {
+    const wasConnected = this.state === "connected";
     const reasonText = reason.toString("utf-8") || String(code);
     this.logger.warn(`WebSocket closed: ${code} ${reasonText}`);
     this.ws = null;
@@ -371,6 +397,9 @@ export class TunnelClient {
     this.executor.abortAll();
 
     this.setState("stopped");
+    if (wasConnected) {
+      this.markTunnelDisconnected(reasonText);
+    }
 
     if (this.shouldReconnect && code !== 1008) {
       this.scheduleReconnect();
@@ -481,6 +510,30 @@ export class TunnelClient {
     if (this.state === next) return;
     this.state = next;
     this.writeHealth();
+  }
+
+  private markTunnelDisconnected(reason: string): void {
+    this.disconnectedSinceLastConnect = true;
+    const now = this.now();
+    if (
+      this.lastDisconnectNotifyAt !== null &&
+      now - this.lastDisconnectNotifyAt < this.disconnectNotifyDebounceMs
+    ) {
+      return;
+    }
+    this.lastDisconnectNotifyAt = now;
+    this.notify(
+      "DeckAgent disconnected",
+      `Tunnel disconnected from ${this.config.worker_url}: ${reason}`,
+    );
+  }
+
+  private notify(title: string, body: string): void {
+    try {
+      this.notifier(title, body);
+    } catch {
+      // Notifications are best-effort and must not affect reconnect logic.
+    }
   }
 
   private writeHealth(

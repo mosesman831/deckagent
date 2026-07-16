@@ -114,6 +114,8 @@ export const PolicySchema = z.object({
   allow_secret_injection: z.boolean().default(true),
   /** When true, daemon may load custom tools from ~/.deckagent/plugins. */
   allow_plugins: z.boolean().default(true),
+  /** When true, custom plugins must pin the entry file hash in plugin.json. */
+  require_plugin_integrity: z.boolean().default(false),
   max_file_read_size: z.number().int().positive().default(10 * 1024 * 1024),
   max_command_timeout: z.number().int().positive().default(300),
   network: z

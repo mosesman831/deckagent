@@ -62,6 +62,7 @@ Usage:
   deckagent policy deny <path>    Add denied directory
   deckagent policy lock|unlock    Lock policy / create UI unlock token
   deckagent plugin list        List custom tool plugins
+  deckagent plugin hash <name> Print plugin entry sha256 for pinning
   deckagent ui                 Open local control UI (http://127.0.0.1:9150)
   deckagent doctor [--watch]   Check DeckAgent health and prerequisites
   deckagent uninstall [--dry-run] [--keep-config] [--keep-logs] [--delete-worker] [--unregister-device] [--yes]

@@ -89,7 +89,7 @@ import {
 } from "./src/health.js";
 import { createRegistry, setSnapshotsDir, type ToolRegistry } from "@deckagent/mcp-server";
 import { resolve as resolvePath } from "node:path";
-import { loadPlugins } from "./src/plugins.js";
+import { hashFileSha256, loadPlugins } from "./src/plugins.js";
 
 let passed = 0;
 let failed = 0;
@@ -237,6 +237,11 @@ function testStrictDefaultPolicyCreation(): void {
     assertEqual(policy.allowed_directories.length, 0, "strict default has no allowed directories");
     assertEqual(policy.trusted_directories.length, 0, "strict default has no trusted directories");
     assertEqual(policy.allow_plugins, false, "strict default disables plugins");
+    assertEqual(
+      policy.require_plugin_integrity,
+      true,
+      "strict default requires plugin integrity",
+    );
     assertEqual(policy.allow_secret_injection, false, "strict default disables secret injection");
     assertEqual(policy.terminal_mode, "allowlist", "strict default terminal allowlist");
     assertEqual(policy.command_mode, "allowlist", "strict default command allowlist");
@@ -273,6 +278,8 @@ function testReadOnly(): void {
 
   const cmd = checkToolAllowed("execute_command", { command: "echo hi" }, policy);
   assert(!cmd.allowed, "blocks execute_command in read_only");
+  const job = checkToolAllowed("start_job", { command: "echo hi" }, policy);
+  assert(!job.allowed, "blocks start_job in read_only");
 
   const read = checkToolAllowed("read_file", { path: join(homedir(), ".deckagent") }, policy);
   // May fail path if .deckagent doesn't exist under allowed ~ — home is allowed
@@ -338,6 +345,17 @@ function testNoPreconfirmedBypass(): void {
   assert(
     result.requiresConfirmation === true,
     "requiresConfirmation even when _preconfirmed is set",
+  );
+
+  const startJobResult = checkToolAllowed(
+    "start_job",
+    { command: "echo hi", _preconfirmed: true },
+    { ...policy, require_confirmation: ["start_job"] },
+  );
+  assert(startJobResult.allowed, "start_job still structurally allowed");
+  assert(
+    startJobResult.requiresConfirmation === true,
+    "start_job requires confirmation even when _preconfirmed is set",
   );
 }
 
@@ -640,6 +658,91 @@ function testTunnelAuthOkHandling(): void {
     );
     assertEqual(parsed.tunnel, "disconnected", "incompatible auth_ok disconnects");
     assertEqual(incompatibleClient.getState(), "stopped", "incompatible auth_ok leaves client stopped");
+  } finally {
+    logger.shutdown();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function testTunnelOpsAlerts(): void {
+  section("tunnel ops alerts (W5.7)");
+
+  const dir = mkdtempSync(join(tmpdir(), "deckagent-alerts-"));
+  const healthPath = join(dir, "health.json");
+  const logger = new Logger("error", false);
+  const executor = {
+    abortAll() {
+      return undefined;
+    },
+  } as unknown as ToolExecutor;
+  const config = {
+    device_id: "11111111-1111-4111-8111-111111111111",
+    token: "t".repeat(32),
+    worker_url: "https://example.workers.dev",
+    device_name: "test-device",
+    heartbeat_interval: 15,
+    tool_timeout: 60,
+    auto_connect: true,
+    log_level: "error" as const,
+  };
+  const alerts: Array<{ title: string; body: string }> = [];
+  let now = 1_000;
+
+  const authOk = (session: string) =>
+    JSON.stringify({
+      type: "auth_ok",
+      session_id: session,
+      worker_version: "worker-1.2.3",
+      min_protocol_version: PROTOCOL_VERSION,
+      server_time: now,
+    });
+
+  try {
+    const client = new TunnelClient(config, executor, logger, {
+      healthPath,
+      notifier: (title, body) => alerts.push({ title, body }),
+      now: () => now,
+    });
+    const clientInternals = client as unknown as {
+      onMessageLine(line: string): void;
+      onClose(code: number, reason: Buffer): void;
+    };
+
+    clientInternals.onMessageLine(authOk("session-1"));
+    assertEqual(alerts.length, 0, "initial connect does not alert");
+
+    clientInternals.onClose(1008, Buffer.from("network_lost"));
+    assertEqual(
+      alerts.filter((alert) => alert.title === "DeckAgent disconnected").length,
+      1,
+      "disconnect alert fires after connected tunnel closes",
+    );
+
+    clientInternals.onMessageLine(authOk("session-2"));
+    assertEqual(
+      alerts.filter((alert) => alert.title === "DeckAgent reconnected").length,
+      1,
+      "reconnect alert fires after disconnected tunnel reconnects",
+    );
+
+    now += 1_000;
+    clientInternals.onClose(1008, Buffer.from("network_lost_again"));
+    assertEqual(
+      alerts.filter((alert) => alert.title === "DeckAgent disconnected").length,
+      1,
+      "disconnect alert debounced within 60s",
+    );
+
+    clientInternals.onMessageLine(authOk("session-3"));
+    now += 60_000;
+    clientInternals.onClose(1008, Buffer.from("network_lost_after_debounce"));
+    assertEqual(
+      alerts.filter((alert) => alert.title === "DeckAgent disconnected").length,
+      2,
+      "disconnect alert fires again after debounce window",
+    );
+
+    client.disconnect();
   } finally {
     logger.shutdown();
     rmSync(dir, { recursive: true, force: true });
@@ -1095,6 +1198,11 @@ function testRestoreSnapshotPolicy(): void {
     defaults.require_confirmation.includes("restore_snapshot"),
     "restore_snapshot in default require_confirmation",
   );
+  assert(
+    defaults.require_confirmation.includes("start_job") &&
+      defaults.require_confirmation.includes("cancel_job"),
+    "background job mutations in default require_confirmation",
+  );
   assertEqual(defaults.allow_secret_injection, false, "allow_secret_injection default false");
   assertEqual(defaults.allow_plugins, false, "allow_plugins default false");
   assert(
@@ -1427,7 +1535,7 @@ function testSecretsVault(): void {
   }
 }
 
-function testBudgets(): void {
+async function testBudgets(): Promise<void> {
   section("budgets (F6)");
 
   const dir = mkdtempSync(join(tmpdir(), "deckagent-budgets-"));
@@ -1465,6 +1573,66 @@ function testBudgets(): void {
 
     // Persistence: re-read via checkBudget
     assert(!checkBudget(policy).ok, "counters survive re-read from disk");
+
+    resetBudgetsForTest();
+    const alerts: Array<{ title: string; body: string }> = [];
+    const logger = new Logger("error", false);
+    const confirmation = new ConfirmationServer(logger, { port: 19158 });
+    const registry = {
+      execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+      register() {
+        return this;
+      },
+      get() {
+        return undefined;
+      },
+      list() {
+        return [];
+      },
+    } as unknown as ToolRegistry;
+    try {
+      const alertPolicy: Policy = {
+        ...createDefaultPolicy(),
+        budgets: {
+          max_tool_calls_per_hour: 1,
+          max_shell_seconds_per_hour: 600,
+          max_bytes_written_per_hour: 50_000_000,
+          max_confirmations_per_hour: 60,
+        },
+        require_confirmation: [],
+      };
+      recordToolCall();
+      const executor = new ToolExecutor({
+        toolRegistry: registry,
+        policy: alertPolicy,
+        logger,
+        confirmationServer: confirmation,
+        toolTimeoutSeconds: 5,
+        notifier: (title, body) => alerts.push({ title, body }),
+      });
+      const outcome = await executor.execute(
+        "budget-alert-1",
+        "get_environment",
+        {},
+        { source: "local" },
+      );
+      assert(!outcome.ok, "budget-exceeded execution is denied");
+      if (!outcome.ok) {
+        assertEqual(outcome.code, "BUDGET_EXCEEDED", "budget alert code");
+      }
+      assertEqual(alerts.length, 1, "budget exceeded sends one alert");
+      assertEqual(
+        alerts[0]?.title,
+        "DeckAgent budget exceeded",
+        "budget alert title",
+      );
+      assert(
+        (alerts[0]?.body ?? "").includes("max_tool_calls_per_hour"),
+        "budget alert body names the budget",
+      );
+    } finally {
+      logger.shutdown();
+    }
   } finally {
     setBudgetsPathForTest(null);
     rmSync(dir, { recursive: true, force: true });
@@ -1768,6 +1936,7 @@ function testCapabilitiesMatrix(): void {
   assert(tools.includes("read_file"), "includes read_file");
   assert(tools.includes("write_file"), "default includes write_file");
   assert(tools.includes("execute_command"), "default includes execute_command");
+  assert(tools.includes("start_job"), "default includes start_job");
   // Default allow_browser=false → browser tools hidden
   assert(!tools.includes("browser_navigate"), "default omits browser tools");
   assert(tools.length < ALL_CATALOG_TOOLS.length, "filtered vs full catalog");
@@ -1776,6 +1945,7 @@ function testCapabilitiesMatrix(): void {
   const roTools = getEnabledTools(readOnly);
   assert(!roTools.includes("write_file"), "read_only omits write_file");
   assert(!roTools.includes("execute_command"), "read_only omits execute_command");
+  assert(!roTools.includes("start_job"), "read_only omits start_job");
   assert(roTools.includes("read_file"), "read_only keeps read_file");
 
   const flags = getCapabilityFlags(policy);
@@ -1820,6 +1990,17 @@ function testSecurityMatrixWave4(): void {
   );
   assert(!cmdDespiteJson.allowed, "execute_command denied when read_only despite allow_terminal");
   assertEqual(cmdDespiteJson.code, "READ_ONLY", "READ_ONLY code for terminal under read_only");
+  const startJobDespiteJson = checkToolAllowed(
+    "start_job",
+    { command: "echo hi" },
+    normalizePolicy({
+      read_only: true,
+      allow_terminal: true,
+      require_confirmation: [],
+    }),
+  );
+  assert(!startJobDespiteJson.allowed, "start_job denied when read_only despite allow_terminal");
+  assertEqual(startJobDespiteJson.code, "READ_ONLY", "READ_ONLY code for start_job under read_only");
 
   // --- protected ~/.ssh write denied even if trusted ~ ---
   const homeTrusted = normalizePolicy({
@@ -1957,6 +2138,13 @@ function testSecurityMatrixWave4(): void {
   );
   assert(gitOk.allowed, "strict allowlist allows git status");
 
+  const startGitOk = checkToolAllowed(
+    "start_job",
+    { command: "git status" },
+    { ...strict, require_confirmation: [] },
+  );
+  assert(startGitOk.allowed, "start_job uses command allowlist");
+
   const browserPolicy = normalizePolicy({
     profile: "dev",
     allow_browser: true,
@@ -2012,6 +2200,8 @@ function testSecurityMatrixWave4(): void {
   assert(!roTools.includes("write_file"), "read_only omits write_file");
   assert(!roTools.includes("edit_file"), "read_only omits edit_file");
   assert(!roTools.includes("execute_command"), "read_only omits execute_command");
+  assert(!roTools.includes("start_job"), "read_only omits start_job");
+  assert(!roTools.includes("get_job"), "read_only omits get_job");
   assert(!roTools.includes("restore_snapshot"), "read_only omits restore_snapshot");
   assert(!roTools.includes("browser_navigate"), "read_only omits browser tools");
 
@@ -2067,6 +2257,21 @@ function testSecurityMatrixWave4(): void {
     normalizePolicy({ profile: "dev" }).allow_plugins,
     true,
     "dev profile defaults allow_plugins=true",
+  );
+  assertEqual(
+    normalizePolicy({ profile: "strict" }).require_plugin_integrity,
+    true,
+    "strict profile defaults require_plugin_integrity=true",
+  );
+  assertEqual(
+    normalizePolicy({ profile: "locked" }).require_plugin_integrity,
+    true,
+    "locked profile defaults require_plugin_integrity=true",
+  );
+  assertEqual(
+    normalizePolicy({ profile: "dev" }).require_plugin_integrity,
+    false,
+    "dev profile defaults require_plugin_integrity=false",
   );
 
   // --- .env protected under trusted tree ---
@@ -2127,6 +2332,8 @@ async function testCustomToolPlugins(): Promise<void> {
   const pluginsRoot = join(dir, "plugins");
   const helloDir = join(pluginsRoot, "hello");
   const slowDir = join(pluginsRoot, "slow");
+  const pinnedDir = join(pluginsRoot, "pinned");
+  const tamperedDir = join(pluginsRoot, "tampered");
   const collisionDir = join(pluginsRoot, "collision");
   const logger = new Logger("error", false);
   const confirmation = new ConfirmationServer(logger, { port: 19154 });
@@ -2134,6 +2341,8 @@ async function testCustomToolPlugins(): Promise<void> {
   try {
     mkdirSync(helloDir, { recursive: true });
     mkdirSync(slowDir, { recursive: true });
+    mkdirSync(pinnedDir, { recursive: true });
+    mkdirSync(tamperedDir, { recursive: true });
     mkdirSync(collisionDir, { recursive: true });
     writeFileSync(
       join(helloDir, "plugin.json"),
@@ -2198,6 +2407,55 @@ async function testCustomToolPlugins(): Promise<void> {
       "export async function run() { await new Promise((resolve) => setTimeout(resolve, 5000)); return { content: [{ type: 'text', text: 'too late' }] }; }\n",
     );
     writeFileSync(
+      join(pinnedDir, "index.mjs"),
+      "export async function run() { return { content: [{ type: 'text', text: 'pinned ok' }] }; }\n",
+    );
+    const pinnedHash = await hashFileSha256(join(pinnedDir, "index.mjs"));
+    writeFileSync(
+      join(pinnedDir, "plugin.json"),
+      JSON.stringify(
+        {
+          name: "pinned_plugin",
+          description: "Pinned plugin",
+          version: "1.0.0",
+          entry: "index.mjs",
+          inputSchema: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+          require_confirmation: false,
+          integrity: { sha256: pinnedHash },
+        },
+        null,
+        2,
+      ),
+    );
+    writeFileSync(
+      join(tamperedDir, "index.mjs"),
+      "export async function run() { return { content: [{ type: 'text', text: 'tampered' }] }; }\n",
+    );
+    writeFileSync(
+      join(tamperedDir, "plugin.json"),
+      JSON.stringify(
+        {
+          name: "tampered_plugin",
+          description: "Tampered plugin",
+          version: "1.0.0",
+          entry: "index.mjs",
+          inputSchema: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
+          require_confirmation: false,
+          integrity: { sha256: "0".repeat(64) },
+        },
+        null,
+        2,
+      ),
+    );
+    writeFileSync(
       join(collisionDir, "plugin.json"),
       JSON.stringify(
         {
@@ -2230,7 +2488,7 @@ async function testCustomToolPlugins(): Promise<void> {
       pluginsRoot,
     });
 
-    assertEqual(loaded.plugins.length, 2, "loads valid plugins");
+    assertEqual(loaded.plugins.length, 3, "loads valid plugins");
     assert(
       loaded.plugins.some((plugin) => plugin.name === "hello_plugin"),
       "loads hello_plugin",
@@ -2238,6 +2496,18 @@ async function testCustomToolPlugins(): Promise<void> {
     assert(
       loaded.plugins.some((plugin) => plugin.name === "slow_plugin"),
       "loads slow_plugin",
+    );
+    assert(
+      loaded.plugins.some(
+        (plugin) =>
+          plugin.name === "pinned_plugin" &&
+          plugin.integrity_status === "ok",
+      ),
+      "loads plugin with matching integrity hash",
+    );
+    assert(
+      !loaded.plugins.some((plugin) => plugin.name === "tampered_plugin"),
+      "skips plugin with mismatched integrity hash",
     );
     assert(
       !loaded.plugins.some((plugin) => plugin.name === "read_file"),
@@ -2368,6 +2638,36 @@ async function testCustomToolPlugins(): Promise<void> {
       pluginsRoot,
     });
     assertEqual(disabledLoad.plugins.length, 0, "allow_plugins=false skips plugin loading");
+
+    const requireIntegrityLoad = await loadPlugins({
+      registry: createRegistry(),
+      policy: normalizePolicy({
+        profile: "dev",
+        allow_plugins: true,
+        require_plugin_integrity: true,
+        require_confirmation: [],
+      }),
+      logger,
+      pluginsRoot,
+    });
+    assert(
+      requireIntegrityLoad.plugins.some(
+        (plugin) => plugin.name === "pinned_plugin",
+      ),
+      "require_plugin_integrity=true loads pinned plugin",
+    );
+    assert(
+      !requireIntegrityLoad.plugins.some(
+        (plugin) => plugin.name === "hello_plugin",
+      ),
+      "require_plugin_integrity=true skips missing hash",
+    );
+    assert(
+      !requireIntegrityLoad.plugins.some(
+        (plugin) => plugin.name === "tampered_plugin",
+      ),
+      "require_plugin_integrity=true skips mismatched hash",
+    );
   } finally {
     logger.shutdown();
     rmSync(dir, { recursive: true, force: true });
@@ -2388,6 +2688,7 @@ async function main(): Promise<void> {
   testVersionFields();
   testHealthWriter();
   testTunnelAuthOkHandling();
+  testTunnelOpsAlerts();
   await testConfirmationFlow();
   await testConfirmationDiffPreview();
   testConfigWorkspaceSchema();
@@ -2397,7 +2698,7 @@ async function main(): Promise<void> {
   await testRestoreSnapshotTargetRecheck();
   await testSandboxPlanAttachedByExecutor();
   testSecretsVault();
-  testBudgets();
+  await testBudgets();
   await testMetricsCounters();
   await testControlUi();
   testCapabilitiesMatrix();

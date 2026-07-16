@@ -132,6 +132,7 @@ export const PolicySchema = z
     allow_terminal: z.boolean().default(true),
     allow_computer_use: z.boolean().default(false),
     allow_plugins: z.boolean().default(false),
+    require_plugin_integrity: z.boolean().default(false),
     command_mode: z.enum(['blocklist', 'allowlist']).default('blocklist'),
     allowed_commands: z.array(z.string()).default([]),
     terminal_mode: z.enum(['off', 'allowlist', 'blocklist', 'sandbox_fs']).default('blocklist'),
@@ -227,6 +228,7 @@ export function applyProfileDefaults(
       allow_browser: false,
       allow_secret_injection: false,
       allow_plugins: false,
+      require_plugin_integrity: true,
       allow_terminal: allowTerminal,
       protected_path_policy: 'deny_all',
       network: {
@@ -257,6 +259,7 @@ export function applyProfileDefaults(
     allow_terminal: base.allow_terminal ?? true,
     allow_secret_injection: base.allow_secret_injection ?? true,
     allow_plugins: base.allow_plugins ?? true,
+    require_plugin_integrity: base.require_plugin_integrity ?? false,
     protected_path_policy: base.protected_path_policy ?? 'deny_write',
     network: base.network ?? {
       allow_browser_hosts: [],
@@ -291,6 +294,7 @@ export function generateDefaultPolicy(overrides: Partial<Policy> = {}): Policy {
     read_only: false,
     allow_computer_use: false,
     allow_plugins: profile === 'dev',
+    require_plugin_integrity: profile === 'dev' ? false : true,
     max_file_read_size: 10 * 1024 * 1024,
     max_command_timeout: 300,
     budgets: { ...DEFAULT_BUDGETS },

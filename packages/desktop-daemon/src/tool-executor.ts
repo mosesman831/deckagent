@@ -43,7 +43,10 @@ import {
   summarizeArgsForAudit,
   type AuditSource,
 } from "./audit-log.js";
-import { sendDesktopNotification } from "./notify.js";
+import {
+  sendDesktopNotification,
+  type DesktopNotifier,
+} from "./notify.js";
 import { applySecretInjection } from "./secrets.js";
 import {
   checkBudget,
@@ -114,6 +117,8 @@ export interface ToolExecutorOptions {
   auditLogDir?: string;
   /** Custom plugin tools loaded into the registry at daemon startup. */
   pluginToolNames?: readonly string[];
+  /** Notification hook for alerts/tests. Defaults to the OS desktop notifier. */
+  notifier?: DesktopNotifier;
 }
 
 /**
@@ -129,6 +134,7 @@ export class ToolExecutor {
   private toolTimeoutSeconds: number;
   private auditLogDir?: string;
   private pluginToolNames: Set<string>;
+  private notifier: DesktopNotifier;
   private activeExecutions = new Map<string, AbortController>();
 
   constructor(options: ToolExecutorOptions) {
@@ -140,6 +146,7 @@ export class ToolExecutor {
     this.toolTimeoutSeconds = options.toolTimeoutSeconds;
     this.auditLogDir = options.auditLogDir;
     this.pluginToolNames = new Set(options.pluginToolNames ?? []);
+    this.notifier = options.notifier ?? sendDesktopNotification;
 
     try {
       setMaxFileReadSize(this.policy.max_file_read_size);
@@ -336,6 +343,7 @@ export class ToolExecutor {
           !!restoreTargetCheck.requiresConfirmation,
       });
       if (!budgetCheck.ok) {
+        this.notifyBudgetExceeded(budgetCheck.budget, budgetCheck.message);
         outcome = {
           ok: false,
           code: budgetCheck.code ?? "BUDGET_EXCEEDED",
@@ -538,7 +546,7 @@ export class ToolExecutor {
 
     // Best-effort OS notification — never fail the tool flow.
     try {
-      sendDesktopNotification(
+      this.notifier(
         "DeckAgent approval needed",
         `${tool} — open ${url}`,
       );
@@ -625,6 +633,20 @@ export class ToolExecutor {
         reject(err);
       });
     });
+  }
+
+  private notifyBudgetExceeded(
+    budget: string | undefined,
+    message: string | undefined,
+  ): void {
+    try {
+      this.notifier(
+        "DeckAgent budget exceeded",
+        `${budget ?? "budget"}: ${message ?? "Budget exceeded"}`,
+      );
+    } catch {
+      // Notifications are best-effort; never fail tool execution.
+    }
   }
 
   private resolveTimeout(

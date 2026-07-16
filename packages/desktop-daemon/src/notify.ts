@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 
+export type DesktopNotifier = (title: string, body: string) => void;
+
 /**
  * Best-effort desktop notification. Never throws; never fails the caller.
  */

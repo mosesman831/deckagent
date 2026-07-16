@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { getConfigDir, getPolicyPath } from './configure.js';
 
@@ -34,10 +35,20 @@ const ManifestSchema = z.object({
   version: z.string().min(1),
   entry: z.string().min(1),
   inputSchema: z.record(z.unknown()),
-  require_confirmation: z.boolean().optional().default(true)
+  require_confirmation: z.boolean().optional().default(true),
+  integrity: z
+    .object({
+      sha256: z
+        .string()
+        .regex(/^[a-fA-F0-9]{64}$/, 'sha256 must be 64 hex characters')
+        .transform((value) => value.toLowerCase())
+    })
+    .strict()
+    .optional()
 });
 
 type Manifest = z.infer<typeof ManifestSchema>;
+type PluginIntegrityStatus = 'ok' | 'missing' | 'mismatch';
 
 interface PluginListRow {
   name: string;
@@ -46,6 +57,7 @@ interface PluginListRow {
   directory: string;
   enabled: boolean;
   requireConfirmation: boolean;
+  integrityStatus: PluginIntegrityStatus;
   error?: string;
 }
 
@@ -53,6 +65,7 @@ interface RawPolicy {
   profile?: string;
   read_only?: boolean;
   allow_plugins?: boolean;
+  require_plugin_integrity?: boolean;
 }
 
 function getPluginsRoot(): string {
@@ -70,7 +83,11 @@ function readRawPolicy(): RawPolicy | null {
       profile: typeof record.profile === 'string' ? record.profile : undefined,
       read_only: typeof record.read_only === 'boolean' ? record.read_only : undefined,
       allow_plugins:
-        typeof record.allow_plugins === 'boolean' ? record.allow_plugins : undefined
+        typeof record.allow_plugins === 'boolean' ? record.allow_plugins : undefined,
+      require_plugin_integrity:
+        typeof record.require_plugin_integrity === 'boolean'
+          ? record.require_plugin_integrity
+          : undefined
     };
   } catch {
     return null;
@@ -85,7 +102,19 @@ function effectiveAllowPlugins(policy: RawPolicy | null): boolean {
   return false;
 }
 
-function discoverPlugins(root: string, allowPlugins: boolean): PluginListRow[] {
+function effectiveRequirePluginIntegrity(policy: RawPolicy | null): boolean {
+  if (typeof policy?.require_plugin_integrity === 'boolean') {
+    return policy.require_plugin_integrity;
+  }
+  const profile = policy?.profile ?? 'strict';
+  return profile === 'strict' || profile === 'locked';
+}
+
+export function discoverPlugins(
+  root: string,
+  allowPlugins: boolean,
+  requirePluginIntegrity: boolean
+): PluginListRow[] {
   if (!fs.existsSync(root)) return [];
 
   let rootReal: string;
@@ -112,16 +141,29 @@ function discoverPlugins(root: string, allowPlugins: boolean): PluginListRow[] {
           throw new Error('plugin.json resolves outside plugin directory');
         }
         const manifest = readManifest(manifestReal);
+        const entryReal = resolvePluginEntry(rootReal, pluginDirReal, manifest);
+        const integrityStatus = getPluginIntegrityStatus(manifest, entryReal);
         const collision = BUILTIN_TOOL_NAMES.has(manifest.name) || seen.has(manifest.name);
+        const integrityError = integrityListError(integrityStatus, requirePluginIntegrity);
         seen.add(manifest.name);
         return {
           name: manifest.name,
           version: manifest.version,
           description: manifest.description,
           directory: pluginDirReal,
-          enabled: allowPlugins && !collision,
+          enabled: allowPlugins && !collision && !integrityError,
           requireConfirmation: manifest.require_confirmation,
-          ...(collision ? { error: 'tool name collides with another tool' } : {})
+          integrityStatus,
+          ...(collision || integrityError
+            ? {
+                error: [
+                  collision ? 'tool name collides with another tool' : null,
+                  integrityError
+                ]
+                  .filter((message): message is string => !!message)
+                  .join('; ')
+              }
+            : {})
         };
       } catch (err) {
         return {
@@ -131,6 +173,7 @@ function discoverPlugins(root: string, allowPlugins: boolean): PluginListRow[] {
           directory: pluginDir,
           enabled: false,
           requireConfirmation: true,
+          integrityStatus: 'missing',
           error: err instanceof Error ? err.message : String(err)
         };
       }
@@ -152,6 +195,72 @@ function readManifest(manifestPath: string): Manifest {
     throw new Error('plugin entry must be a relative path');
   }
   return result.data;
+}
+
+export function hashFileSha256(filePath: string): string {
+  return createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+}
+
+export function hashPluginByName(
+  name: string,
+  root = getPluginsRoot()
+): { name: string; entry: string; sha256: string } {
+  if (!PLUGIN_NAME_PATTERN.test(name)) {
+    throw new Error(`Invalid plugin name: ${name}`);
+  }
+  if (!fs.existsSync(root)) {
+    throw new Error(`Plugins root not found: ${root}`);
+  }
+  const rootReal = fs.realpathSync(root);
+  for (const entry of fs.readdirSync(rootReal, { withFileTypes: true })) {
+    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+    const pluginDir = path.resolve(rootReal, entry.name);
+    const pluginDirReal = fs.realpathSync(pluginDir);
+    if (!isPathInsideOrEqual(pluginDirReal, rootReal)) continue;
+    const manifestPath = path.resolve(pluginDirReal, 'plugin.json');
+    const manifestReal = fs.realpathSync(manifestPath);
+    if (!isPathInsideOrEqual(manifestReal, pluginDirReal)) continue;
+    const manifest = readManifest(manifestReal);
+    if (manifest.name !== name) continue;
+    const entryReal = resolvePluginEntry(rootReal, pluginDirReal, manifest);
+    return {
+      name: manifest.name,
+      entry: entryReal,
+      sha256: hashFileSha256(entryReal)
+    };
+  }
+  throw new Error(`Plugin not found: ${name}`);
+}
+
+function resolvePluginEntry(
+  rootReal: string,
+  pluginDirReal: string,
+  manifest: Manifest
+): string {
+  const entryPath = path.resolve(pluginDirReal, manifest.entry);
+  const entryReal = fs.realpathSync(entryPath);
+  if (!isPathInsideOrEqual(entryReal, rootReal)) {
+    throw new Error('plugin entry resolves outside plugins root');
+  }
+  return entryReal;
+}
+
+function getPluginIntegrityStatus(
+  manifest: Manifest,
+  entryReal: string
+): PluginIntegrityStatus {
+  const expected = manifest.integrity?.sha256;
+  if (!expected) return 'missing';
+  return hashFileSha256(entryReal) === expected ? 'ok' : 'mismatch';
+}
+
+function integrityListError(
+  status: PluginIntegrityStatus,
+  requirePluginIntegrity: boolean
+): string | null {
+  if (status === 'mismatch') return 'PLUGIN_INTEGRITY_MISMATCH';
+  if (status === 'missing' && requirePluginIntegrity) return 'PLUGIN_INTEGRITY_MISSING';
+  return null;
 }
 
 function isPathInsideOrEqual(candidate: string, root: string): boolean {
@@ -183,6 +292,7 @@ function normalizeForCompare(inputPath: string): string {
 function printPluginHelp(): void {
   console.log(`Usage:
   deckagent plugin list
+  deckagent plugin hash <name>
 `);
 }
 
@@ -193,19 +303,29 @@ export async function runPluginCommand(args: string[]): Promise<void> {
     return;
   }
 
+  if (sub === 'hash') {
+    const name = args[1];
+    if (!name) {
+      throw new Error('Usage: deckagent plugin hash <name>');
+    }
+    console.log(hashPluginByName(name).sha256);
+    return;
+  }
+
   if (sub !== 'list') {
-    throw new Error(`Unknown plugin command: ${sub}. Use: list`);
+    throw new Error(`Unknown plugin command: ${sub}. Use: list, hash <name>`);
   }
 
   const root = getPluginsRoot();
   const rawPolicy = readRawPolicy();
   const allowPlugins = effectiveAllowPlugins(rawPolicy);
+  const requirePluginIntegrity = effectiveRequirePluginIntegrity(rawPolicy);
   const profile = rawPolicy?.profile ?? 'strict';
-  const rows = discoverPlugins(root, allowPlugins);
+  const rows = discoverPlugins(root, allowPlugins, requirePluginIntegrity);
 
   console.log(`Plugins root: ${root}`);
   console.log(
-    `Policy: plugins ${allowPlugins ? 'enabled' : 'disabled'} (profile=${profile})`
+    `Policy: plugins ${allowPlugins ? 'enabled' : 'disabled'} (profile=${profile}, require_plugin_integrity=${String(requirePluginIntegrity)})`
   );
   if (!allowPlugins) {
     console.log('Hint: use profile=dev with allow_plugins=true, then restart the daemon.');
@@ -218,9 +338,10 @@ export async function runPluginCommand(args: string[]): Promise<void> {
   for (const row of rows) {
     const status = row.enabled ? 'enabled' : 'disabled';
     const confirm = row.requireConfirmation ? 'confirmation' : 'no confirmation';
+    const integrity = `integrity ${row.integrityStatus}`;
     const error = row.error ? ` (${row.error})` : '';
     console.log(
-      `- ${row.name || path.basename(row.directory)} ${row.version} — ${status}, ${confirm}${error}`
+      `- ${row.name || path.basename(row.directory)} ${row.version} — ${status}, ${confirm}, ${integrity}${error}`
     );
     if (row.description) {
       console.log(`  ${row.description}`);

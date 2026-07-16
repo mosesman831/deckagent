@@ -42,6 +42,11 @@ export interface BudgetCheckResult {
   ok: boolean;
   code?: "BUDGET_EXCEEDED";
   message?: string;
+  budget?:
+    | "max_tool_calls_per_hour"
+    | "max_shell_seconds_per_hour"
+    | "max_bytes_written_per_hour"
+    | "max_confirmations_per_hour";
   /** When the oldest event in the blocking bucket ages out (ISO). */
   resets_at?: string;
 }
@@ -140,6 +145,7 @@ export function checkBudget(
     return {
       ok: false,
       code: "BUDGET_EXCEEDED",
+      budget: "max_tool_calls_per_hour",
       message: `Budget exceeded: max_tool_calls_per_hour (${budgets.max_tool_calls_per_hour}) reached. Try again after ${oldestResetIso(state.tool_calls, now)}.`,
       resets_at: oldestResetIso(state.tool_calls, now),
     };
@@ -150,6 +156,7 @@ export function checkBudget(
     return {
       ok: false,
       code: "BUDGET_EXCEEDED",
+      budget: "max_shell_seconds_per_hour",
       message: `Budget exceeded: max_shell_seconds_per_hour (${budgets.max_shell_seconds_per_hour}) reached. Try again after ${oldestResetIso(
         state.shell_seconds.map((e) => e.ts),
         now,
@@ -166,6 +173,7 @@ export function checkBudget(
     return {
       ok: false,
       code: "BUDGET_EXCEEDED",
+      budget: "max_bytes_written_per_hour",
       message: `Budget exceeded: max_bytes_written_per_hour (${budgets.max_bytes_written_per_hour}) reached. Try again after ${oldestResetIso(
         state.bytes_written.map((e) => e.ts),
         now,
@@ -184,6 +192,7 @@ export function checkBudget(
     return {
       ok: false,
       code: "BUDGET_EXCEEDED",
+      budget: "max_confirmations_per_hour",
       message: `Budget exceeded: max_confirmations_per_hour (${budgets.max_confirmations_per_hour}) reached. Try again after ${oldestResetIso(state.confirmations, now)}.`,
       resets_at: oldestResetIso(state.confirmations, now),
     };

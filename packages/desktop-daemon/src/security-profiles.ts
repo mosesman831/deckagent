@@ -46,6 +46,7 @@ export function applyProfileDefaults(policy: Policy): Policy {
     next.allow_browser = false;
     next.allow_secret_injection = false;
     next.allow_plugins = false;
+    next.require_plugin_integrity = true;
 
     // Network: block shell net tools by default in strict
     next.network = {
@@ -69,10 +70,12 @@ export function applyProfileDefaults(policy: Policy): Policy {
     if (!policy.protected_path_policy) {
       next.protected_path_policy = "deny_write";
     }
+    next.require_plugin_integrity = policy.require_plugin_integrity ?? false;
   }
 
   if (next.profile === "locked") {
     next.allow_plugins = false;
+    next.require_plugin_integrity = true;
   }
 
   return next;
@@ -135,10 +138,12 @@ export function normalizePolicy(policy: Policy): Policy {
       next.allowed_commands = [...STRICT_ALLOWED_COMMANDS];
     }
     next.allow_plugins = false;
+    next.require_plugin_integrity = true;
   }
 
   if (next.profile === "locked") {
     next.allow_plugins = false;
+    next.require_plugin_integrity = true;
   }
 
   return next;
@@ -185,6 +190,13 @@ export function describeNormalizationFixes(
     !after.allow_plugins
   ) {
     notes.push(`${before.profile} profile forces allow_plugins=false`);
+  }
+  if (
+    (before.profile === "strict" || before.profile === "locked") &&
+    !before.require_plugin_integrity &&
+    after.require_plugin_integrity
+  ) {
+    notes.push(`${before.profile} profile requires plugin integrity`);
   }
   return notes;
 }
