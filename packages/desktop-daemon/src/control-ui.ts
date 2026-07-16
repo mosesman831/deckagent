@@ -589,6 +589,13 @@ function renderDashboard(): string {
     }
     .approval .tool { font-weight: 600; margin-bottom: 4px; }
     .approval .reason { color: var(--muted); font-size: 0.9rem; margin-bottom: 8px; }
+    .approval .path {
+      color: var(--muted);
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.75rem;
+      margin: 0 0 6px;
+      word-break: break-all;
+    }
     .approval pre {
       background: #121820;
       padding: 8px;
@@ -597,6 +604,11 @@ function renderDashboard(): string {
       overflow: auto;
       max-height: 120px;
       margin: 0 0 10px;
+    }
+    .approval pre.diff {
+      max-height: 360px;
+      color: #e7ecf3;
+      border: 1px solid var(--border);
     }
     button {
       border: 0;
@@ -689,10 +701,14 @@ function renderDashboard(): string {
         return;
       }
       el.innerHTML = pending.map(function (a) {
+        var preview = a.diff && a.diff.unified
+          ? '<div class="path">' + esc(a.diff.path || "") + '</div>' +
+            '<pre class="diff">' + esc(a.diff.unified) + '</pre>'
+          : '<pre>' + esc(a.argsSummary || "") + '</pre>';
         return '<div class="approval">' +
           '<div class="tool">' + esc(a.tool) + '</div>' +
           '<div class="reason">' + esc(a.reason) + '</div>' +
-          '<pre>' + esc(a.argsSummary || "") + '</pre>' +
+          preview +
           '<button class="approve" data-id="' + esc(a.id) + '" data-action="approve">Approve</button>' +
           '<button class="deny" data-id="' + esc(a.id) + '" data-action="deny">Deny</button>' +
         '</div>';

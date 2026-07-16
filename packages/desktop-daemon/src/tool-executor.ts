@@ -1,6 +1,14 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import {
+  closeSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  readSync,
+  statSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve as resolvePath } from "node:path";
+import { extname, join, resolve as resolvePath } from "node:path";
+import { gunzipSync } from "node:zlib";
 import type { ToolRegistry } from "@deckagent/mcp-server";
 import {
   execute_command_stream,
@@ -27,6 +35,8 @@ import type { Logger } from "./logger.js";
 import {
   ConfirmationServer,
   CONFIRMATION_WAIT_MS,
+  redactSecretLikeLines,
+  type ApprovalDiff,
 } from "./confirmation-server.js";
 import {
   appendAuditLog,
@@ -73,6 +83,10 @@ type RestoreTargetCheckOutcome =
       code: string;
       message: string;
     };
+
+const DIFF_SOURCE_MAX_BYTES = 200 * 1024;
+const DIFF_UNIFIED_MAX_BYTES = 20 * 1024;
+const DIFF_CONTEXT_LINES = 3;
 
 const SnapshotMetadataSchema = z
   .object({
@@ -506,10 +520,12 @@ export class ToolExecutor {
     args: Record<string, unknown>,
     reason: string,
   ): Promise<ToolExecutionOutcome | { ok: true }> {
+    const diff = this.buildApprovalDiff(tool, args);
     const { id, url } = this.confirmationServer.createApproval({
       tool,
       args,
       reason,
+      ...(diff ? { diff } : {}),
     });
 
     const banner = `APPROVAL NEEDED: open ${url}`;
@@ -557,6 +573,20 @@ export class ToolExecutor {
         `Confirmation required for tool '${tool}' but was not approved in time (${decision}). ` +
         `Open ${url} to approve, then retry. Reason: ${reason}`,
     };
+  }
+
+  private buildApprovalDiff(
+    tool: string,
+    args: Record<string, unknown>,
+  ): ApprovalDiff | undefined {
+    try {
+      return buildApprovalDiff(tool, args);
+    } catch (err) {
+      this.logger.warn(
+        `Could not build diff preview for '${tool}': ${humanError(err)}`,
+      );
+      return undefined;
+    }
   }
 
   private runWithAbort<T>(
@@ -614,6 +644,290 @@ export class ToolExecutor {
 
     return this.toolTimeoutSeconds * 1000;
   }
+}
+
+interface TextPreview {
+  text: string;
+  truncated: boolean;
+  exists: boolean;
+}
+
+function buildApprovalDiff(
+  tool: string,
+  args: Record<string, unknown>,
+): ApprovalDiff | undefined {
+  if (tool === "write_file") {
+    return buildWriteFileDiff(args);
+  }
+  if (tool === "edit_file") {
+    return buildEditFileDiff(args);
+  }
+  if (tool === "restore_snapshot") {
+    return buildRestoreSnapshotDiff(args);
+  }
+  return undefined;
+}
+
+function buildWriteFileDiff(args: Record<string, unknown>): ApprovalDiff | undefined {
+  const filePath = typeof args.path === "string" ? args.path : null;
+  const content = typeof args.content === "string" ? args.content : null;
+  if (!filePath || content === null) return undefined;
+
+  const before = readTextPreview(filePath);
+  if (!before) return undefined;
+
+  const after = capUtf8Text(content, DIFF_SOURCE_MAX_BYTES);
+  return makeApprovalDiff(filePath, before.text, after);
+}
+
+function buildEditFileDiff(args: Record<string, unknown>): ApprovalDiff | undefined {
+  const filePath = typeof args.path === "string" ? args.path : null;
+  const oldString = typeof args.old_string === "string" ? args.old_string : null;
+  const newString = typeof args.new_string === "string" ? args.new_string : null;
+  const replaceAll = args.replace_all === true;
+  if (!filePath || oldString === null || newString === null) return undefined;
+
+  const before = readTextPreview(filePath);
+  if (!before || !before.exists) return undefined;
+
+  let after: string;
+  if (oldString.length === 0) {
+    after = `${before.text}\n[DeckAgent diff preview: old_string is empty]`;
+  } else {
+    const occurrences = before.text.split(oldString).length - 1;
+    if (occurrences === 0) {
+      after =
+        `${before.text}\n` +
+        "[DeckAgent diff preview: old_string was not found in previewed content]";
+    } else if (!replaceAll && occurrences > 1) {
+      after =
+        `${before.text}\n` +
+        "[DeckAgent diff preview: old_string has multiple matches; tool will require replace_all=true]";
+    } else {
+      after = replaceAll
+        ? before.text.split(oldString).join(newString)
+        : before.text.replace(oldString, newString);
+    }
+  }
+
+  return makeApprovalDiff(filePath, before.text, capUtf8Text(after, DIFF_SOURCE_MAX_BYTES));
+}
+
+function buildRestoreSnapshotDiff(
+  args: Record<string, unknown>,
+): ApprovalDiff | undefined {
+  const id = typeof args.id === "string" ? args.id : "";
+  const meta = findSnapshotMetadataById(id);
+  if (!meta) return undefined;
+
+  const before = readTextPreview(meta.path);
+  if (!before) return undefined;
+
+  const after = readSnapshotTextPreview(meta);
+  if (!after) return undefined;
+
+  return makeApprovalDiff(meta.path, before.text, after.text);
+}
+
+function makeApprovalDiff(
+  filePath: string,
+  before: string,
+  after: string,
+): ApprovalDiff {
+  const redactedBefore = redactSecretLikeLines(before);
+  const redactedAfter = redactSecretLikeLines(after);
+  return {
+    path: filePath,
+    language: inferLanguage(filePath),
+    before: capUtf8Text(redactedBefore, DIFF_SOURCE_MAX_BYTES),
+    after: capUtf8Text(redactedAfter, DIFF_SOURCE_MAX_BYTES),
+    unified: capUtf8Text(
+      createUnifiedDiff(filePath, redactedBefore, redactedAfter),
+      DIFF_UNIFIED_MAX_BYTES,
+    ),
+  };
+}
+
+function readTextPreview(filePath: string): TextPreview | null {
+  let stat;
+  try {
+    stat = statSync(filePath);
+  } catch (err) {
+    if ((err as { code?: unknown }).code === "ENOENT") {
+      return { text: "", truncated: false, exists: false };
+    }
+    return null;
+  }
+
+  if (!stat.isFile()) {
+    return {
+      text: `[DeckAgent diff preview omitted: ${filePath} is not a regular file]`,
+      truncated: false,
+      exists: true,
+    };
+  }
+
+  const bytesToRead = Math.min(stat.size, DIFF_SOURCE_MAX_BYTES);
+  const buffer = Buffer.allocUnsafe(bytesToRead);
+  let fd: number | null = null;
+  try {
+    fd = openSync(filePath, "r");
+    const bytesRead = readSync(fd, buffer, 0, bytesToRead, 0);
+    const text = buffer.subarray(0, bytesRead).toString("utf-8");
+    const truncated = stat.size > bytesRead;
+    return {
+      text: truncated ? appendTruncationNotice(text, DIFF_SOURCE_MAX_BYTES) : text,
+      truncated,
+      exists: true,
+    };
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {
+        // best-effort close
+      }
+    }
+  }
+}
+
+function readSnapshotTextPreview(meta: SnapshotMetadata): TextPreview | null {
+  let stat;
+  try {
+    stat = statSync(meta.blob_path);
+  } catch {
+    return null;
+  }
+
+  if (!stat.isFile()) return null;
+  if (stat.size > DIFF_SOURCE_MAX_BYTES) {
+    return {
+      text: `[DeckAgent diff preview omitted: snapshot blob exceeds ${DIFF_SOURCE_MAX_BYTES} bytes]`,
+      truncated: true,
+      exists: true,
+    };
+  }
+
+  try {
+    const compressed = readFileSync(meta.blob_path);
+    let content: Buffer;
+    try {
+      content = gunzipSync(compressed);
+    } catch {
+      content = compressed;
+    }
+    return {
+      text: capUtf8Text(content.toString("utf-8"), DIFF_SOURCE_MAX_BYTES),
+      truncated: content.length > DIFF_SOURCE_MAX_BYTES,
+      exists: true,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function createUnifiedDiff(
+  filePath: string,
+  before: string,
+  after: string,
+): string {
+  const beforeLines = splitDiffLines(before);
+  const afterLines = splitDiffLines(after);
+  const header = [`--- ${filePath} (before)`, `+++ ${filePath} (after)`];
+
+  let prefix = 0;
+  while (
+    prefix < beforeLines.length &&
+    prefix < afterLines.length &&
+    beforeLines[prefix] === afterLines[prefix]
+  ) {
+    prefix += 1;
+  }
+
+  let suffix = 0;
+  while (
+    suffix < beforeLines.length - prefix &&
+    suffix < afterLines.length - prefix &&
+    beforeLines[beforeLines.length - 1 - suffix] ===
+      afterLines[afterLines.length - 1 - suffix]
+  ) {
+    suffix += 1;
+  }
+
+  const oldContextStart = Math.max(0, prefix - DIFF_CONTEXT_LINES);
+  const newContextStart = Math.max(0, prefix - DIFF_CONTEXT_LINES);
+  const oldChangeEnd = beforeLines.length - suffix;
+  const newChangeEnd = afterLines.length - suffix;
+  const oldContextEnd = Math.min(
+    beforeLines.length,
+    oldChangeEnd + DIFF_CONTEXT_LINES,
+  );
+  const newContextEnd = Math.min(
+    afterLines.length,
+    newChangeEnd + DIFF_CONTEXT_LINES,
+  );
+  const oldCount = oldContextEnd - oldContextStart;
+  const newCount = newContextEnd - newContextStart;
+  const oldStart = oldCount === 0 ? 0 : oldContextStart + 1;
+  const newStart = newCount === 0 ? 0 : newContextStart + 1;
+  const body = [
+    `@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`,
+  ];
+
+  if (before === after) {
+    const unchanged = beforeLines.slice(0, DIFF_CONTEXT_LINES);
+    if (unchanged.length === 0) {
+      body.push(" [no changes in preview]");
+    } else {
+      body.push(...unchanged.map((line) => ` ${line}`));
+    }
+    return [...header, ...body].join("\n");
+  }
+
+  for (let i = oldContextStart; i < prefix; i += 1) {
+    body.push(` ${beforeLines[i] ?? ""}`);
+  }
+  for (let i = prefix; i < oldChangeEnd; i += 1) {
+    body.push(`-${beforeLines[i] ?? ""}`);
+  }
+  for (let i = prefix; i < newChangeEnd; i += 1) {
+    body.push(`+${afterLines[i] ?? ""}`);
+  }
+  for (let i = newChangeEnd; i < newContextEnd; i += 1) {
+    body.push(` ${afterLines[i] ?? ""}`);
+  }
+
+  return [...header, ...body].join("\n");
+}
+
+function splitDiffLines(text: string): string[] {
+  if (text.length === 0) return [];
+  const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const lines = normalized.split("\n");
+  if (lines.length > 1 && lines[lines.length - 1] === "") {
+    lines.pop();
+  }
+  return lines;
+}
+
+function capUtf8Text(text: string, maxBytes: number): string {
+  const buffer = Buffer.from(text, "utf-8");
+  if (buffer.length <= maxBytes) return text;
+  return appendTruncationNotice(
+    buffer.subarray(0, maxBytes).toString("utf-8").replace(/\uFFFD$/u, ""),
+    maxBytes,
+  );
+}
+
+function appendTruncationNotice(text: string, maxBytes: number): string {
+  return `${text}\n[DeckAgent diff preview truncated at ${maxBytes} bytes]`;
+}
+
+function inferLanguage(filePath: string): string | undefined {
+  const ext = extname(filePath).toLowerCase().slice(1);
+  return ext.length > 0 ? ext : undefined;
 }
 
 function stripRemoteBypass(

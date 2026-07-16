@@ -713,9 +713,136 @@ async function testConfirmationFlow(): Promise<void> {
     assert(res.ok, "HTTP approve returns ok");
     assertEqual(await httpWait, "approved", "HTTP approve settles waiter");
 
+    const diffApproval = server.createApproval({
+      tool: "edit_file",
+      args: { path: "/tmp/preview.txt", old_string: "old", new_string: "new" },
+      reason: "diff render",
+      diff: {
+        path: "/tmp/preview.txt",
+        language: "txt",
+        before: "old\n",
+        after: "new\n",
+        unified:
+          "--- /tmp/preview.txt (before)\n" +
+          "+++ /tmp/preview.txt (after)\n" +
+          "@@ -1,1 +1,1 @@\n" +
+          "-old\n" +
+          "+new",
+      },
+    });
+    const diffPage = await fetch(
+      `http://127.0.0.1:19148/confirm/${diffApproval.id}`,
+    );
+    const diffHtml = await diffPage.text();
+    assert(diffHtml.includes('class="diff"'), "confirm page renders diff block");
+    assert(diffHtml.includes("@@ -1,1 +1,1 @@"), "confirm page includes hunk marker");
+    assert(!diffHtml.includes("old_string"), "diff-backed page omits raw args");
+    assert(server.denyForTest(diffApproval.id), "deny diff approval cleanup");
+
     void CONFIRMATION_WAIT_MS; // referenced for documentation linkage
   } finally {
     await server.stop();
+  }
+}
+
+async function testConfirmationDiffPreview(): Promise<void> {
+  section("confirmation diff preview (W5.3)");
+
+  const dir = mkdtempSync(join(tmpdir(), "deckagent-diff-preview-"));
+  const auditDir = join(dir, "audit");
+  const logger = new Logger("error", false);
+  const confirmation = new ConfirmationServer(logger, { port: 19149 });
+  confirmation.openInBrowser = () => undefined;
+
+  const registry = {
+    execute: async () => ({
+      content: [{ type: "text", text: "ok" }],
+    }),
+    register() {
+      return this;
+    },
+    get() {
+      return undefined;
+    },
+    list() {
+      return [];
+    },
+  } as unknown as ToolRegistry;
+
+  const executor = new ToolExecutor({
+    toolRegistry: registry,
+    policy: {
+      ...createDefaultPolicy(),
+      allowed_directories: [dir],
+      trusted_directories: [dir],
+      require_confirmation: ["edit_file", "write_file"],
+    },
+    logger,
+    confirmationServer: confirmation,
+    toolTimeoutSeconds: 5,
+    auditLogDir: auditDir,
+  });
+
+  try {
+    const editPath = join(dir, "preview.txt");
+    writeFileSync(
+      editPath,
+      "alpha\nold line\nAPI_KEY=old-secret\nomega\n",
+      "utf-8",
+    );
+
+    const editRun = executor.execute(
+      "diff-edit",
+      "edit_file",
+      {
+        path: editPath,
+        old_string: "old line\nAPI_KEY=old-secret",
+        new_string: "new line\nAPI_KEY=new-secret",
+      },
+      { source: "local" },
+    );
+    const editApproval = confirmation.listPending()[0]!;
+    assert(editApproval.diff !== undefined, "edit approval includes diff");
+    const editUnified = editApproval.diff?.unified ?? "";
+    assert(editUnified.includes("@@"), "edit diff contains hunk marker");
+    assert(editUnified.includes("-old line"), "edit diff contains removed line");
+    assert(editUnified.includes("+new line"), "edit diff contains added line");
+    assert(
+      editUnified.includes("[redacted secret-like line]"),
+      "edit diff redacts secret-like line",
+    );
+    assert(!editUnified.includes("old-secret"), "edit diff omits old secret value");
+    assert(!editUnified.includes("new-secret"), "edit diff omits new secret value");
+    assert(confirmation.approveForTest(editApproval.id), "approve edit diff");
+    const editResult = await editRun;
+    assert(editResult.ok, "edit proceeds after approval");
+
+    const writePath = join(dir, "new-file.txt");
+    const writeRun = executor.execute(
+      "diff-write",
+      "write_file",
+      {
+        path: writePath,
+        content: "created line\nTOKEN=write-secret\n",
+      },
+      { source: "local" },
+    );
+    const writeApproval = confirmation.listPending()[0]!;
+    assert(writeApproval.diff !== undefined, "write approval includes diff");
+    const writeUnified = writeApproval.diff?.unified ?? "";
+    assert(writeUnified.includes("@@"), "write diff contains hunk marker");
+    assert(writeUnified.includes("+created line"), "write new file shows added line");
+    assert(
+      writeUnified.includes("+[redacted secret-like line]"),
+      "write diff redacts secret-like added line",
+    );
+    assert(!writeUnified.includes("write-secret"), "write diff omits secret value");
+    assert(confirmation.approveForTest(writeApproval.id), "approve write diff");
+    const writeResult = await writeRun;
+    assert(writeResult.ok, "write proceeds after approval");
+  } finally {
+    logger.shutdown();
+    rmSync(dir, { recursive: true, force: true });
   }
 }
 
@@ -1553,6 +1680,36 @@ async function testControlUi(): Promise<void> {
     assertEqual(await wait, "approved", "UI approve settles waiter");
     assertEqual(confirmation.listPending().length, 0, "listPending empty after approve");
 
+    const diffApproval = confirmation.createApproval({
+      tool: "write_file",
+      args: { path: "/tmp/control-preview.txt", content: "hello" },
+      reason: "control diff test",
+      diff: {
+        path: "/tmp/control-preview.txt",
+        language: "txt",
+        before: "",
+        after: "hello\n",
+        unified:
+          "--- /tmp/control-preview.txt (before)\n" +
+          "+++ /tmp/control-preview.txt (after)\n" +
+          "@@ -0,0 +1,1 @@\n" +
+          "+hello",
+      },
+    });
+    const diffApprovalsRes = await fetch("http://127.0.0.1:19151/api/approvals");
+    const diffApprovals = (await diffApprovalsRes.json()) as {
+      pending: Array<{ id: string; diff?: { unified: string } }>;
+    };
+    const diffPending = diffApprovals.pending.find(
+      (approval) => approval.id === diffApproval.id,
+    );
+    assert(diffPending?.diff !== undefined, "control UI API includes diff");
+    assert(
+      diffPending?.diff?.unified.includes("+hello") === true,
+      "control UI API diff includes added line",
+    );
+    assert(confirmation.denyForTest(diffApproval.id), "deny control diff cleanup");
+
     const homePage = await fetch(`http://127.0.0.1:19151/?token=${uiToken}`);
     assert(homePage.ok, "GET / dashboard ok");
     const cookie = homePage.headers.get("set-cookie") ?? "";
@@ -2232,6 +2389,7 @@ async function main(): Promise<void> {
   testHealthWriter();
   testTunnelAuthOkHandling();
   await testConfirmationFlow();
+  await testConfirmationDiffPreview();
   testConfigWorkspaceSchema();
   testWorkspacePathEnforcement();
   testLocalResources();

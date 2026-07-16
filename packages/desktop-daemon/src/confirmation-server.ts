@@ -10,11 +10,20 @@ export const CONFIRMATION_EXPIRE_MS = 60_000;
 
 export type ApprovalDecision = "approved" | "denied" | "expired" | "timeout";
 
-interface PendingApproval {
+export interface ApprovalDiff {
+  path: string;
+  language?: string;
+  before: string;
+  after: string;
+  unified: string;
+}
+
+export interface PendingApproval {
   id: string;
   tool: string;
   argsSummary: string;
   reason: string;
+  diff?: ApprovalDiff;
   csrfToken: string;
   createdAt: number;
   expiresAt: number;
@@ -98,6 +107,7 @@ export class ConfirmationServer {
     tool: string;
     args: Record<string, unknown>;
     reason: string;
+    diff?: ApprovalDiff;
     expireMs?: number;
   }): { id: string; url: string; expiresAt: number } {
     const id = randomUUID();
@@ -108,6 +118,7 @@ export class ConfirmationServer {
       tool: options.tool,
       argsSummary: summarizeArgs(options.args),
       reason: options.reason,
+      ...(options.diff ? { diff: options.diff } : {}),
       csrfToken: randomBytes(32).toString("hex"),
       createdAt: now,
       expiresAt: now + expireMs,
@@ -217,6 +228,7 @@ export class ConfirmationServer {
     tool: string;
     argsSummary: string;
     reason: string;
+    diff?: ApprovalDiff;
     createdAt: number;
     expiresAt: number;
   }> {
@@ -226,6 +238,7 @@ export class ConfirmationServer {
       tool: string;
       argsSummary: string;
       reason: string;
+      diff?: ApprovalDiff;
       createdAt: number;
       expiresAt: number;
     }> = [];
@@ -237,6 +250,7 @@ export class ConfirmationServer {
         tool: approval.tool,
         argsSummary: approval.argsSummary,
         reason: approval.reason,
+        ...(approval.diff ? { diff: approval.diff } : {}),
         createdAt: approval.createdAt,
         expiresAt: approval.expiresAt,
       });
@@ -468,6 +482,16 @@ export class ConfirmationServer {
       0,
       Math.ceil((approval.expiresAt - Date.now()) / 1000),
     );
+    const preview = approval.diff
+      ? `
+          <p class="label">Diff preview</p>
+          <p class="path">${escapeHtml(approval.diff.path)}</p>
+          <pre class="diff">${escapeHtml(approval.diff.unified)}</pre>
+        `
+      : `
+          <p class="label">Arguments</p>
+          <pre class="args">${escapeHtml(approval.argsSummary)}</pre>
+        `;
 
     sendHtml(
       res,
@@ -479,8 +503,7 @@ export class ConfirmationServer {
         <div class="panel">
           <p class="tool-name">Tool: <code>${escapeHtml(approval.tool)}</code></p>
           <p class="reason">${escapeHtml(approval.reason)}</p>
-          <p class="label">Arguments</p>
-          <pre class="args">${escapeHtml(approval.argsSummary)}</pre>
+          ${preview}
           <p class="expires">Expires in ~${remainingSec}s</p>
         </div>
         <form method="POST" action="/confirm/${id}/approve" style="display:inline">
@@ -561,7 +584,9 @@ function summarizeArgs(args: Record<string, unknown>): string {
     }
     const value = sanitized[key];
     if (typeof value === "string" && value.length > 200) {
-      sanitized[key] = value.slice(0, 200) + "…";
+      sanitized[key] = redactSecretLikeLines(value.slice(0, 200)) + "…";
+    } else if (typeof value === "string") {
+      sanitized[key] = redactSecretLikeLines(value);
     }
   }
   try {
@@ -570,6 +595,23 @@ function summarizeArgs(args: Record<string, unknown>): string {
     return String(sanitized);
   }
 }
+
+export function redactSecretLikeLines(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      const content = line.replace(/^([ +\-])/, "");
+      if (SECRET_LIKE_LINE_RE.test(content)) {
+        const prefix = line.match(/^([ +\-])/)?.[1] ?? "";
+        return `${prefix}[redacted secret-like line]`;
+      }
+      return line;
+    })
+    .join("\n");
+}
+
+const SECRET_LIKE_LINE_RE =
+  /\b(api[_-]?key|token|secret|password|authorization|bearer|credential)\b/i;
 
 function escapeHtml(text: string): string {
   return text
@@ -587,14 +629,16 @@ function htmlPage(title: string, body: string): string {
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>${escapeHtml(title)} — DeckAgent</title>
   <style>
-    body { font-family: ui-sans-serif, system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; color: #1f2328; background: #f6f8fa; }
+    body { font-family: ui-sans-serif, system-ui, sans-serif; max-width: 860px; margin: 40px auto; padding: 0 16px; color: #1f2328; background: #f6f8fa; }
     h1 { font-size: 1.4rem; margin-bottom: 8px; }
     .panel { background: #fff; border: 1px solid #d0d7de; border-radius: 8px; padding: 16px 18px; margin: 16px 0 20px; }
     .tool-name { font-size: 1.05rem; margin: 0 0 8px; }
     .reason { color: #57606a; margin: 0 0 12px; }
     .label { font-weight: 600; margin: 0 0 6px; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.02em; color: #57606a; }
-    code, pre.args { background: #f6f8fa; padding: 2px 6px; border-radius: 4px; font-size: 0.9rem; }
-    pre.args { padding: 12px; overflow: auto; margin: 0 0 12px; border: 1px solid #eaeef2; white-space: pre-wrap; word-break: break-word; }
+    code, pre.args, pre.diff { background: #f6f8fa; padding: 2px 6px; border-radius: 4px; font-size: 0.9rem; }
+    pre.args, pre.diff { padding: 12px; overflow: auto; margin: 0 0 12px; border: 1px solid #eaeef2; white-space: pre-wrap; word-break: break-word; }
+    pre.diff { max-height: 420px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.82rem; background: #0d1117; color: #e6edf3; }
+    .path { margin: -2px 0 8px; color: #57606a; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.82rem; word-break: break-all; }
     .expires { margin: 0; color: #57606a; font-size: 0.9rem; }
     .btn { color: #fff; padding: 10px 18px; border: 0; cursor: pointer; font-size: 16px; border-radius: 6px; }
     .btn.approve { background: #1a7f37; }
