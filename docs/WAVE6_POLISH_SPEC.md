@@ -147,14 +147,14 @@ Then integrator: build, test, `e2e:mcp`, commit leftovers, push, PR update.
 
 ## 4. Acceptance
 
-- [ ] Control UI shows health strip + jobs + colored diffs + audit table
-- [ ] Confirmation page has countdown + colored diffs
-- [ ] `/health` returns version/uptime; 401/429 include hint; 429 has Retry-After
-- [ ] Tool descriptions mention jobs/workspace/edit guidance
-- [ ] CLI help grouped; doctor --json works; onboard output structured
-- [ ] health.json includes reconnect timing fields
-- [ ] README quickstart updated
-- [ ] `npm test`, `security:smoke`, `e2e:mcp` green
+- [x] Control UI shows health strip + jobs + colored diffs + audit table
+- [x] Confirmation page has countdown + colored diffs
+- [x] `/health` returns version/uptime; 401/429 include hint; 429 has Retry-After
+- [x] Tool descriptions mention jobs/workspace/edit guidance
+- [x] CLI help grouped; doctor --json works; onboard output structured
+- [x] health.json includes reconnect timing fields
+- [x] README quickstart updated
+- [x] `npm test`, `security:smoke`, `e2e:mcp` green
 
 ---
 

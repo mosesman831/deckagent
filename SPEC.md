@@ -96,6 +96,7 @@ Implemented:
 
 - P0–P2 hardening: real `sandbox_fs`, restore path checks, strict defaults, publishable packages, CSRF/UI tokens, plugin isolation, browser host enforcement, soft MCP errors, rate limits, safer uninstall, rotation, metrics, abort signals, release workflow, token rotate.
 - Wave 5 operator experience: `deckagent onboard` / `smoke`, confirmation diffs, device revoke, background jobs, plugin integrity pins, ops alerts, `npm run e2e:mcp`.
+- Wave 6 polish: Control UI health/jobs/diffs/audit, confirmation UX, rich `/health` + auth/rate-limit hints, clearer MCP catalogs, grouped CLI help, doctor JSON/strict, reconnect health fields, README quickstart.
 
 Not shipped (intentionally deferred):
 
