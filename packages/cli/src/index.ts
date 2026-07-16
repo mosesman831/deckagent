@@ -23,6 +23,8 @@ import { openControlUi } from './ui.js';
 import { runPluginCommand } from './plugin.js';
 import { runUninstall } from './uninstall.js';
 import { runTokenCommand } from './token.js';
+import { runOnboardCommand } from './onboard.js';
+import { runSmokeCommand } from './smoke.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -51,6 +53,9 @@ Usage:
   deckagent device revoke <id> [--yes]  Revoke a device on the Worker
   deckagent device clear       Clear sticky preferred device
   deckagent token rotate [--deploy]  Rotate the Worker Bearer API token
+  deckagent onboard [--skip-smoke] [--json]  Verify local setup and connector readiness
+  deckagent smoke [--profile mcpplayground|cursor|claude-desktop] [--base-url URL] [--token TOKEN]
+                              Run an MCP JSON-RPC smoke matrix against the Worker
   deckagent workspace use <path>  Set active workspace (project scope)
   deckagent workspace status   Show current workspace
   deckagent workspace clear    Clear workspace from config
@@ -187,6 +192,22 @@ async function main(): Promise<void> {
 
     case 'token': {
       await runTokenCommand(args.slice(1));
+      break;
+    }
+
+    case 'onboard': {
+      const code = await runOnboardCommand(args.slice(1));
+      if (code !== 0) {
+        process.exit(code);
+      }
+      break;
+    }
+
+    case 'smoke': {
+      const code = await runSmokeCommand(args.slice(1));
+      if (code !== 0) {
+        process.exit(code);
+      }
       break;
     }
 
