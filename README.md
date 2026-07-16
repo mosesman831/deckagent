@@ -14,7 +14,9 @@ flowchart LR
 ## Quick Start
 
 ```bash
-npx deckagent setup     # one-command setup wizard
+npx @deckagent/cli setup     # one-command setup wizard
+# or install once:
+npm install -g @deckagent/cli
 ```
 
 Then add the printed Worker URL as a custom MCP connector in ChatGPT, Claude, or Gemini.
@@ -53,7 +55,7 @@ cat > ~/.deckagent/config.json << 'EOF'
 EOF
 
 # 5. Start the daemon
-npx deckagent daemon --foreground
+npx @deckagent/cli daemon --foreground
 ```
 
 ## Features
@@ -254,12 +256,13 @@ deckagent tunnel --name deckagent-dev
 
 Configure ingress in `~/.cloudflared/config.yml` so the named tunnel forwards to `http://127.0.0.1:8787`. Production setups should still prefer a deployed Worker on `*.workers.dev` (or a custom domain on the Worker) — tunnels are ideal for local/dev or when you need a stable hostname in front of `wrangler dev`.
 
-### Publishing the CLI (`npx deckagent`)
+### Publishing the CLI (`npx @deckagent/cli`)
 
 ```bash
 npm run bundle:cli   # copies Worker sources into packages/cli/assets/worker
 npm run build
-# publish @deckagent/cli (includes assets/ + depends on @deckagent/desktop-daemon)
+node scripts/pack-smoke.mjs
+# publish in order: @deckagent/mcp-server, @deckagent/desktop-daemon, @deckagent/cli
 ```
 
 ## Development

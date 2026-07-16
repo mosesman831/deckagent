@@ -1,6 +1,6 @@
 {
   "name": "@deckagent/cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "One-command setup wizard for DeckAgent",
   "type": "module",
   "main": "dist/index.js",
@@ -23,7 +23,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@deckagent/desktop-daemon": "file:../desktop-daemon",
+    "@deckagent/desktop-daemon": "0.2.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

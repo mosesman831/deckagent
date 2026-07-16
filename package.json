@@ -10,6 +10,7 @@
   "scripts": {
     "build": "npm run build --workspace=packages/mcp-server && npm run build --workspace=packages/cloudflare-worker && npm run build --workspace=packages/desktop-daemon && npm run build --workspace=packages/cli",
     "bundle:cli": "node scripts/bundle-cli-assets.mjs",
+    "pack:smoke": "node scripts/pack-smoke.mjs",
     "test": "npm run test --workspace=packages/mcp-server && npm run test --workspace=packages/cloudflare-worker && npm run test --workspace=packages/desktop-daemon && npm run test --workspace=packages/cli",
     "test:all": "npm test && npm run test --workspace=packages/v2-extension",
     "security:smoke": "npm run build --workspace=packages/desktop-daemon && node scripts/security-smoke.mjs",

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Copy Cloudflare Worker sources into packages/cli/assets/worker so a published
- * `@deckagent/cli` package (npx deckagent) can deploy without the monorepo tree.
+ * `@deckagent/cli` package (npx @deckagent/cli) can deploy without the monorepo tree.
  *
  * Usage: node scripts/bundle-cli-assets.mjs
  * Also run via: npm run bundle:cli

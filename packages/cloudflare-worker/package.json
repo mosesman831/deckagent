@@ -1,6 +1,7 @@
 {
   "name": "@deckagent/cloudflare-worker",
   "version": "0.1.0",
+  "private": true,
   "description": "Cloudflare Worker MCP endpoint for DeckAgent",
   "type": "module",
   "main": "dist/index.js",
