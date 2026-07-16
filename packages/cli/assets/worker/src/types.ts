@@ -94,6 +94,12 @@ export interface StateUpdateMessage {
 export interface PolicyCapsMessage {
   type: "policy_caps";
   tools: string[];
+  /** Daemon-provided dynamic plugin tool definitions (not part of static catalog). */
+  tool_catalog?: Array<{
+    name: string;
+    description: string;
+    inputSchema: Record<string, unknown>;
+  }>;
   capabilities?: {
     fs_read?: boolean;
     fs_write?: boolean;

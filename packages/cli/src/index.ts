@@ -22,6 +22,7 @@ import { runSecretCommand } from './secrets.js';
 import { runPolicyCommand } from './policy-cmd.js';
 import { runDeviceCommand } from './device-cmd.js';
 import { openControlUi } from './ui.js';
+import { runPluginCommand } from './plugin.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -59,6 +60,7 @@ Usage:
   deckagent policy trust <path>   Add trusted directory
   deckagent policy deny <path>    Add denied directory
   deckagent policy lock|unlock    Lock policy / create UI unlock token
+  deckagent plugin list        List custom tool plugins
   deckagent ui                 Open local control UI (http://127.0.0.1:9150)
   deckagent doctor [--watch]   Check DeckAgent health and prerequisites
   deckagent uninstall          Stop daemon and remove config
@@ -176,6 +178,11 @@ async function main(): Promise<void> {
 
     case 'device': {
       await runDeviceCommand(args.slice(1));
+      break;
+    }
+
+    case 'plugin': {
+      await runPluginCommand(args.slice(1));
       break;
     }
 

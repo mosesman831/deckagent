@@ -129,8 +129,15 @@ export function isToolEnabled(toolName: string, policy: Policy): boolean {
 /**
  * Return tool names the daemon currently allows (for tools/list / policy_caps).
  */
-export function getEnabledTools(policy: Policy): string[] {
-  return ALL_KNOWN_TOOLS.filter((t) => isToolEnabled(t, policy));
+export function getEnabledTools(
+  policy: Policy,
+  pluginToolNames: readonly string[] = [],
+): string[] {
+  const builtinTools = ALL_KNOWN_TOOLS.filter((t) => isToolEnabled(t, policy));
+  if (!policy.allow_plugins || pluginToolNames.length === 0) {
+    return builtinTools;
+  }
+  return [...builtinTools, ...pluginToolNames];
 }
 
 /**

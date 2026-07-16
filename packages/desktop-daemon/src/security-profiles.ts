@@ -45,6 +45,7 @@ export function applyProfileDefaults(policy: Policy): Policy {
 
     next.allow_browser = false;
     next.allow_secret_injection = false;
+    next.allow_plugins = false;
 
     // Network: block shell net tools by default in strict
     next.network = {
@@ -70,6 +71,10 @@ export function applyProfileDefaults(policy: Policy): Policy {
     }
   }
 
+  if (next.profile === "locked") {
+    next.allow_plugins = false;
+  }
+
   return next;
 }
 
@@ -86,6 +91,7 @@ export function normalizePolicy(policy: Policy): Policy {
     next.allow_browser = false;
     next.allow_secret_injection = false;
     next.allow_computer_use = false;
+    next.allow_plugins = false;
     next.terminal_mode = "off";
   }
 
@@ -128,6 +134,11 @@ export function normalizePolicy(policy: Policy): Policy {
     if (!next.allowed_commands || next.allowed_commands.length === 0) {
       next.allowed_commands = [...STRICT_ALLOWED_COMMANDS];
     }
+    next.allow_plugins = false;
+  }
+
+  if (next.profile === "locked") {
+    next.allow_plugins = false;
   }
 
   return next;
@@ -154,6 +165,9 @@ export function describeNormalizationFixes(
     if (before.allow_computer_use && !after.allow_computer_use) {
       notes.push("read_only forces allow_computer_use=false");
     }
+    if (before.allow_plugins && !after.allow_plugins) {
+      notes.push("read_only forces allow_plugins=false");
+    }
   }
   if (
     before.profile === "strict" &&
@@ -164,6 +178,13 @@ export function describeNormalizationFixes(
   }
   if (before.profile === "locked" && !before.profile_locked && after.profile_locked) {
     notes.push("profile=locked sets profile_locked=true");
+  }
+  if (
+    (before.profile === "strict" || before.profile === "locked") &&
+    before.allow_plugins &&
+    !after.allow_plugins
+  ) {
+    notes.push(`${before.profile} profile forces allow_plugins=false`);
   }
   return notes;
 }

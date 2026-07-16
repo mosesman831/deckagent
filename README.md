@@ -99,6 +99,12 @@ The Worker and daemon communicate through a Durable Object that acts as both the
 | **Snapshots** | `list_snapshots`, `restore_snapshot` |
 | **Environment** | `get_environment` |
 
+Custom plugins can add tools when the daemon is online. Drop a plugin at
+`~/.deckagent/plugins/<name>/plugin.json` with an `entry` module exporting
+`run(args)`, enable the dev profile or `allow_plugins=true`, then restart the
+daemon. Use `deckagent plugin list` to inspect discovered plugins; plugin tools
+are not included in the Worker's offline static catalog.
+
 ## Security
 
 - Daemon runs as a **normal user process** — never root
@@ -134,6 +140,7 @@ All config lives in `~/.deckagent/`:
 ~/.deckagent/
 ├── config.json      # device_id, token, worker_url, workspace, preferences
 ├── policy.json      # allowed dirs, blocked commands, confirmations, budgets
+├── plugins/         # optional custom tool plugins
 └── logs/
     ├── deckagent-YYYY-MM-DD.log
     └── audit.jsonl

@@ -27,6 +27,11 @@ interface ReadResourceMessage {
 /** Payload sent as tunnel `policy_caps` for Worker tools/list filtering. */
 export type PolicyCapsPayload = {
   tools: string[];
+  tool_catalog?: Array<{
+    name: string;
+    description: string;
+    inputSchema: Record<string, unknown>;
+  }>;
   capabilities?: {
     fs_read?: boolean;
     fs_write?: boolean;
@@ -267,6 +272,7 @@ export class TunnelClient {
     this.send({
       type: "policy_caps",
       tools: caps.tools,
+      tool_catalog: caps.tool_catalog,
       capabilities: caps.capabilities,
       read_only: caps.read_only,
       profile: caps.profile,

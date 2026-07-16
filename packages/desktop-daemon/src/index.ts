@@ -18,10 +18,12 @@ import { LocalTunnelServer } from "./local-server.js";
 import { ToolExecutor } from "./tool-executor.js";
 import { ControlUiServer } from "./control-ui.js";
 import { DAEMON_VERSION, PROTOCOL_VERSION } from "./version.js";
+import { getCapabilityFlags } from "./capabilities.js";
 import {
-  getCapabilityFlags,
-  getEnabledTools,
-} from "./capabilities.js";
+  loadPlugins,
+  type PluginLoadResult,
+  type PluginToolCatalogEntry,
+} from "./plugins.js";
 
 const DECK_DIR = join(homedir(), ".deckagent");
 const PID_FILE = join(DECK_DIR, "daemon.pid");
@@ -118,6 +120,32 @@ function applyRuntimePolicy(policy: Policy, enableBrowserFlag: boolean): Policy 
   return normalizePolicy({ ...normalized, allow_browser: true });
 }
 
+function applyPluginConfirmationDefaults(
+  policy: Policy,
+  pluginLoad: PluginLoadResult,
+): Policy {
+  if (pluginLoad.requireConfirmationTools.length === 0) {
+    return policy;
+  }
+  return normalizePolicy({
+    ...policy,
+    require_confirmation: [
+      ...new Set([
+        ...policy.require_confirmation,
+        ...pluginLoad.requireConfirmationTools,
+      ]),
+    ],
+  });
+}
+
+function filterPluginCatalogForPolicy(
+  enabledTools: readonly string[],
+  pluginCatalog: readonly PluginToolCatalogEntry[],
+): PluginToolCatalogEntry[] {
+  const enabled = new Set(enabledTools);
+  return pluginCatalog.filter((tool) => enabled.has(tool.name));
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
@@ -192,6 +220,29 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  let pluginLoad: PluginLoadResult = {
+    plugins: [],
+    requireConfirmationTools: [],
+    toolCatalog: [],
+  };
+  try {
+    pluginLoad = await loadPlugins({
+      registry: toolRegistry,
+      policy,
+      logger,
+    });
+    policy = applyPluginConfirmationDefaults(policy, pluginLoad);
+  } catch (err) {
+    logger.warn(
+      `Custom tool plugin loading failed closed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    pluginLoad = {
+      plugins: [],
+      requireConfirmationTools: [],
+      toolCatalog: [],
+    };
+  }
+
   // Honor browser enable flag / policy in mcp-server.
   try {
     setBrowserEnabled(policy.allow_browser);
@@ -230,6 +281,7 @@ async function main(): Promise<void> {
     confirmationServer,
     toolTimeoutSeconds: config.tool_timeout,
     workspace: config.workspace ?? null,
+    pluginToolNames: pluginLoad.plugins.map((plugin) => plugin.name),
   });
 
   const localServer = new LocalTunnelServer(executor, logger);
@@ -241,7 +293,11 @@ async function main(): Promise<void> {
           ? (p as { profile: string }).profile
           : undefined;
       return {
-        tools: getEnabledTools(p),
+        tools: executor.getEnabledTools(),
+        tool_catalog: filterPluginCatalogForPolicy(
+          executor.getEnabledTools(),
+          pluginLoad.toolCatalog,
+        ),
         capabilities: getCapabilityFlags(p),
         read_only: p.read_only,
         profile,
@@ -271,7 +327,10 @@ async function main(): Promise<void> {
     setPolicy: (next) => {
       // Normalize on every Control UI update (read_only forces terminal/browser off).
       // TODO(Agent C): reject with PROFILE_LOCKED when profile_locked and no unlock header.
-      const applied = applyRuntimePolicy(next, enableBrowserFlag);
+      const applied = applyPluginConfirmationDefaults(
+        applyRuntimePolicy(next, enableBrowserFlag),
+        pluginLoad,
+      );
       executor.updatePolicy(applied);
       try {
         setBrowserEnabled(applied.allow_browser);

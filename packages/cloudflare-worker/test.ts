@@ -452,6 +452,49 @@ async function main() {
       afterList.some((t) => t.name === "list_devices"),
       "list_devices present after policy_caps filtering"
     );
+    doInst.applyPolicyCapsForTest({
+      tools: [...readOnlySubset, "hello_plugin"],
+      tool_catalog: [
+        {
+          name: "hello_plugin",
+          description: "Say hello",
+          inputSchema: {
+            type: "object",
+            properties: { message: { type: "string" } },
+            required: ["message"],
+          },
+        },
+      ],
+    });
+    const pluginListRes = await doInst.fetch(
+      new Request("https://tunnel-do/mcp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 92,
+          method: "tools/list",
+        }),
+      })
+    );
+    const pluginListBody = (await pluginListRes.json()) as {
+      result?: { tools?: Array<{ name: string; inputSchema?: Record<string, unknown> }> };
+    };
+    const pluginListed = pluginListBody.result?.tools ?? [];
+    assert(
+      !TOOL_NAMES.has("hello_plugin") &&
+        pluginListed.some((t) => t.name === "hello_plugin"),
+      "daemon dynamic plugin appears in DO tools/list without static catalog"
+    );
+    assert(
+      pluginListed.some(
+        (t) =>
+          t.name === "hello_plugin" &&
+          (t.inputSchema as { properties?: Record<string, unknown> } | undefined)
+            ?.properties?.message !== undefined
+      ),
+      "dynamic plugin tools/list includes manifest inputSchema"
+    );
 
     // Edge path: online device + Fake DO with restricted caps.
     await updateDeviceStatus(env, deviceId, "online");

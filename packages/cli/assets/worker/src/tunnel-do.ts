@@ -9,7 +9,11 @@ import type {
   PolicyCapsMessage,
 } from "./types.js";
 import { JsonRpcCode } from "./types.js";
-import { TOOL_NAMES, filterToolCatalog } from "./tool-catalog.js";
+import {
+  TOOL_NAMES,
+  filterToolCatalog,
+  type McpToolDefinition,
+} from "./tool-catalog.js";
 import {
   MCP_INSTRUCTIONS,
   PROMPT_CATALOG,
@@ -79,6 +83,20 @@ function wantsCommandStreamSse(
   return accept.includes("text/event-stream");
 }
 
+function isDynamicToolDefinition(value: unknown): value is McpToolDefinition {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.name === "string" &&
+    typeof candidate.description === "string" &&
+    candidate.inputSchema !== null &&
+    typeof candidate.inputSchema === "object" &&
+    !Array.isArray(candidate.inputSchema)
+  );
+}
+
 type ResourceResultPayload = {
   type: "resource_result";
   contents: ResourceResultMessage["contents"];
@@ -108,13 +126,16 @@ export class TunnelDO implements DurableObject {
    * `null` = no policy_caps yet → advertise full TOOL_CATALOG.
    */
   private enabledTools: Set<string> | null = null;
+  private dynamicTools = new Map<string, McpToolDefinition>();
 
   constructor(_ctx: DurableObjectState, env: Env) {
     this.env = env;
   }
 
   /** Exposed for unit tests — apply a policy_caps payload. */
-  applyPolicyCapsForTest(msg: Pick<PolicyCapsMessage, "tools">): void {
+  applyPolicyCapsForTest(
+    msg: Pick<PolicyCapsMessage, "tools" | "tool_catalog">
+  ): void {
     this.applyPolicyCaps(msg);
   }
 
@@ -123,15 +144,29 @@ export class TunnelDO implements DurableObject {
     return this.enabledTools;
   }
 
-  private applyPolicyCaps(msg: Pick<PolicyCapsMessage, "tools">): void {
+  private applyPolicyCaps(
+    msg: Pick<PolicyCapsMessage, "tools" | "tool_catalog">
+  ): void {
     if (!Array.isArray(msg.tools)) return;
     this.enabledTools = new Set(
       msg.tools.filter((t): t is string => typeof t === "string")
     );
+    this.dynamicTools.clear();
+    if (!Array.isArray(msg.tool_catalog)) return;
+    for (const tool of msg.tool_catalog) {
+      if (!isDynamicToolDefinition(tool)) continue;
+      if (!this.enabledTools.has(tool.name)) continue;
+      if (TOOL_NAMES.has(tool.name)) continue;
+      this.dynamicTools.set(tool.name, tool);
+    }
   }
 
-  private listedTools() {
-    return filterToolCatalog(this.enabledTools);
+  private listedTools(): McpToolDefinition[] {
+    const builtinTools = filterToolCatalog(this.enabledTools);
+    if (this.enabledTools == null || this.dynamicTools.size === 0) {
+      return builtinTools;
+    }
+    return [...builtinTools, ...this.dynamicTools.values()];
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -635,7 +670,10 @@ export class TunnelDO implements DurableObject {
       const toolName = body.params?.name;
       const toolArgs = body.params?.arguments ?? {};
 
-      if (!toolName || !TOOL_NAMES.has(toolName)) {
+      if (
+        !toolName ||
+        (!TOOL_NAMES.has(toolName) && !this.dynamicTools.has(toolName))
+      ) {
         return jsonRpcError(
           id,
           "TOOL_NOT_FOUND",

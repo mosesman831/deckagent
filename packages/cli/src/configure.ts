@@ -128,6 +128,7 @@ export const PolicySchema = z
     allow_browser: z.boolean().default(true),
     allow_terminal: z.boolean().default(true),
     allow_computer_use: z.boolean().default(false),
+    allow_plugins: z.boolean().default(false),
     command_mode: z.enum(['blocklist', 'allowlist']).default('blocklist'),
     allowed_commands: z.array(z.string()).default([]),
     terminal_mode: z.enum(['off', 'allowlist', 'blocklist', 'sandbox_fs']).default('blocklist'),
@@ -222,6 +223,7 @@ export function applyProfileDefaults(
       allowed_commands: [...DEFAULT_STRICT_ALLOWED_COMMANDS],
       allow_browser: false,
       allow_secret_injection: false,
+      allow_plugins: false,
       allow_terminal: allowTerminal,
       protected_path_policy: 'deny_all',
       network: {
@@ -251,6 +253,7 @@ export function applyProfileDefaults(
     allow_browser: base.allow_browser ?? true,
     allow_terminal: base.allow_terminal ?? true,
     allow_secret_injection: base.allow_secret_injection ?? true,
+    allow_plugins: base.allow_plugins ?? true,
     protected_path_policy: base.protected_path_policy ?? 'deny_write',
     network: base.network ?? {
       allow_browser_hosts: [],
@@ -284,6 +287,7 @@ export function generateDefaultPolicy(overrides: Partial<Policy> = {}): Policy {
     require_confirmation: [...DEFAULT_REQUIRE_CONFIRMATION],
     read_only: false,
     allow_computer_use: false,
+    allow_plugins: profile === 'dev',
     max_file_read_size: 10 * 1024 * 1024,
     max_command_timeout: 300,
     budgets: { ...DEFAULT_BUDGETS },
@@ -384,6 +388,7 @@ export function printSecuritySummary(policy: Policy): void {
   console.log(`  Read-only mode:     ${policy.read_only ? 'ON' : 'OFF'}`);
   console.log(`  Terminal tools:     ${policy.allow_terminal ? 'allowed' : 'disabled'} (${policy.terminal_mode})`);
   console.log(`  Browser tools:      ${policy.allow_browser ? 'allowed' : 'disabled'}`);
+  console.log(`  Plugin tools:       ${policy.allow_plugins ? 'allowed' : 'disabled'}`);
   console.log(
     `  Confirm mutations:  ${
       policy.require_confirmation.length > 0

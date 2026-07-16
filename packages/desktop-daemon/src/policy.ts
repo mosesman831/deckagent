@@ -108,6 +108,8 @@ export const PolicySchema = z.object({
   allow_computer_use: z.boolean().default(false),
   /** When true, execute_command may inject vault secrets via use_secrets. */
   allow_secret_injection: z.boolean().default(true),
+  /** When true, daemon may load custom tools from ~/.deckagent/plugins. */
+  allow_plugins: z.boolean().default(true),
   max_file_read_size: z.number().int().positive().default(10 * 1024 * 1024),
   max_command_timeout: z.number().int().positive().default(300),
   network: z
@@ -474,18 +476,50 @@ export function checkToolAllowed(
   args: Record<string, unknown>,
   policy: Policy,
   workspace?: WorkspacePolicy | null,
+  pluginToolNames: readonly string[] = [],
 ): PolicyResult {
   // Fail closed: always evaluate against normalized effective policy
   const effective = normalizePolicy(policy);
 
   const allTools = new Set<string>(ALL_KNOWN_TOOLS);
+  const pluginTools = new Set<string>(pluginToolNames);
+  const isPluginTool = pluginTools.has(toolName);
 
-  if (!allTools.has(toolName)) {
+  if (!allTools.has(toolName) && !isPluginTool) {
+    if (!effective.allow_plugins) {
+      return {
+        allowed: false,
+        code: "TOOL_DISABLED",
+        reason:
+          `[TOOL_DISABLED] Plugin tools are disabled by policy ` +
+          `(allow_plugins=false); restart after enabling plugins`,
+      };
+    }
     return {
       allowed: false,
       code: "TOOL_DISABLED",
       reason: `Unknown tool: ${toolName}`,
     };
+  }
+
+  if (isPluginTool) {
+    if (!effective.allow_plugins) {
+      return {
+        allowed: false,
+        code: "TOOL_DISABLED",
+        reason:
+          `[TOOL_DISABLED] Plugin tool '${toolName}' is blocked because ` +
+          "policy allow_plugins=false",
+      };
+    }
+    if (effective.require_confirmation.includes(toolName)) {
+      return {
+        allowed: true,
+        requiresConfirmation: true,
+        confirmationReason: `Plugin tool '${toolName}' requires confirmation`,
+      };
+    }
+    return { allowed: true };
   }
 
   // S2 capability gate (includes read_only v2)

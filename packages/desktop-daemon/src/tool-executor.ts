@@ -61,6 +61,8 @@ export interface ToolExecutorOptions {
   workspace?: WorkspacePolicy | null;
   /** Override audit log directory (tests). */
   auditLogDir?: string;
+  /** Custom plugin tools loaded into the registry at daemon startup. */
+  pluginToolNames?: readonly string[];
 }
 
 /**
@@ -75,6 +77,7 @@ export class ToolExecutor {
   private confirmationServer: ConfirmationServer;
   private toolTimeoutSeconds: number;
   private auditLogDir?: string;
+  private pluginToolNames: Set<string>;
   private activeExecutions = new Map<string, AbortController>();
 
   constructor(options: ToolExecutorOptions) {
@@ -85,6 +88,7 @@ export class ToolExecutor {
     this.confirmationServer = options.confirmationServer;
     this.toolTimeoutSeconds = options.toolTimeoutSeconds;
     this.auditLogDir = options.auditLogDir;
+    this.pluginToolNames = new Set(options.pluginToolNames ?? []);
 
     try {
       setMaxFileReadSize(this.policy.max_file_read_size);
@@ -101,7 +105,7 @@ export class ToolExecutor {
 
   /** Enabled MCP tool names for Worker tools/list filtering (S2). */
   getEnabledTools(): string[] {
-    return getEnabledTools(this.policy);
+    return getEnabledTools(this.policy, [...this.pluginToolNames]);
   }
 
   /** Full capability matrix + enabled_tools for policy_caps tunnel message. */
@@ -160,7 +164,10 @@ export class ToolExecutor {
   ): Promise<ToolExecutionOutcome> {
     const started = Date.now();
     const source: AuditSource = options?.source ?? "tunnel";
-    this.logger.info(`Executing tool: ${tool}`);
+    const isPluginTool = this.pluginToolNames.has(tool);
+    this.logger.info(
+      isPluginTool ? `Executing plugin:${tool}` : `Executing tool: ${tool}`,
+    );
 
     // Never trust client-controlled confirmation bypass from remote MCP/Worker.
     const args = stripRemoteBypass(rawArgs);
@@ -191,6 +198,7 @@ export class ToolExecutor {
         resolvedArgs,
         this.policy,
         this.workspace,
+        [...this.pluginToolNames],
       );
 
       if (!policyResult.allowed) {
@@ -338,7 +346,7 @@ export class ToolExecutor {
         {
           ts: new Date().toISOString(),
           id,
-          tool,
+          tool: isPluginTool ? `plugin:${tool}` : tool,
           args_summary: summarizeArgsForAudit(auditArgs, {
             secretNames: requestedSecrets,
           }),

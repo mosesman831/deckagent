@@ -77,8 +77,9 @@ import {
   writeDaemonHealth,
   type DaemonHealth,
 } from "./src/health.js";
-import type { ToolRegistry } from "@deckagent/mcp-server";
+import { createRegistry, type ToolRegistry } from "@deckagent/mcp-server";
 import { resolve as resolvePath } from "node:path";
+import { loadPlugins } from "./src/plugins.js";
 
 let passed = 0;
 let failed = 0;
@@ -1358,6 +1359,21 @@ function testSecurityMatrixWave4(): void {
   // --- locked profile sets profile_locked ---
   const locked = normalizePolicy({ profile: "locked" });
   assertEqual(locked.profile_locked, true, "profile=locked sets profile_locked");
+  assertEqual(
+    normalizePolicy({ profile: "strict", allow_plugins: true }).allow_plugins,
+    false,
+    "strict profile forces allow_plugins=false",
+  );
+  assertEqual(
+    normalizePolicy({ profile: "locked", allow_plugins: true }).allow_plugins,
+    false,
+    "locked profile forces allow_plugins=false",
+  );
+  assertEqual(
+    normalizePolicy({ profile: "dev" }).allow_plugins,
+    true,
+    "dev profile defaults allow_plugins=true",
+  );
 
   // --- .env protected under trusted tree ---
   const envRoot = mkdtempSync(join(tmpdir(), "deckagent-env-"));
@@ -1403,6 +1419,159 @@ function testSecurityMatrixWave4(): void {
   }
 }
 
+async function testCustomToolPlugins(): Promise<void> {
+  section("custom tool plugins (F9)");
+
+  const dir = mkdtempSync(join(tmpdir(), "deckagent-plugins-"));
+  const pluginsRoot = join(dir, "plugins");
+  const helloDir = join(pluginsRoot, "hello");
+  const collisionDir = join(pluginsRoot, "collision");
+  const logger = new Logger("error", false);
+  const confirmation = new ConfirmationServer(logger, { port: 19154 });
+
+  try {
+    mkdirSync(helloDir, { recursive: true });
+    mkdirSync(collisionDir, { recursive: true });
+    writeFileSync(
+      join(helloDir, "plugin.json"),
+      JSON.stringify(
+        {
+          name: "hello_plugin",
+          description: "Say hello",
+          version: "1.0.0",
+          entry: "index.mjs",
+          inputSchema: {
+            type: "object",
+            properties: { message: { type: "string" } },
+            required: ["message"],
+            additionalProperties: false,
+          },
+          require_confirmation: false,
+        },
+        null,
+        2,
+      ),
+    );
+    writeFileSync(
+      join(helloDir, "index.mjs"),
+      `export async function run(args) {
+  return { content: [{ type: "text", text: JSON.stringify(args) }], isError: false };
+}
+`,
+    );
+    writeFileSync(
+      join(collisionDir, "plugin.json"),
+      JSON.stringify(
+        {
+          name: "read_file",
+          description: "Collision",
+          version: "1.0.0",
+          entry: "index.mjs",
+          inputSchema: { type: "object", properties: {} },
+        },
+        null,
+        2,
+      ),
+    );
+    writeFileSync(
+      join(collisionDir, "index.mjs"),
+      "export async function run() { return { content: [{ type: 'text', text: 'bad' }] }; }\n",
+    );
+
+    const registry = createRegistry();
+    const policy = normalizePolicy({
+      profile: "dev",
+      allow_plugins: true,
+      require_confirmation: [],
+    });
+    const loaded = await loadPlugins({
+      registry,
+      policy,
+      logger,
+      pluginsRoot,
+    });
+
+    assertEqual(loaded.plugins.length, 1, "loads one valid plugin");
+    assertEqual(loaded.plugins[0]?.name, "hello_plugin", "loads hello_plugin");
+    assert(
+      !loaded.plugins.some((plugin) => plugin.name === "read_file"),
+      "rejects builtin name collision",
+    );
+    assert(
+      loaded.toolCatalog.some((tool) => tool.name === "hello_plugin"),
+      "plugin catalog includes hello_plugin",
+    );
+
+    const executor = new ToolExecutor({
+      toolRegistry: registry,
+      policy,
+      logger,
+      confirmationServer: confirmation,
+      toolTimeoutSeconds: 5,
+      pluginToolNames: ["hello_plugin"],
+    });
+
+    assert(
+      executor.getEnabledTools().includes("hello_plugin"),
+      "enabled tools includes loaded plugin",
+    );
+
+    const ok = await executor.execute(
+      "plugin-ok-1",
+      "hello_plugin",
+      { message: "hi" },
+      { source: "local" },
+    );
+    assert(ok.ok, "plugin execute succeeds");
+    if (ok.ok) {
+      const text = ok.result.content[0]?.text ?? "";
+      assert(text.includes('"message":"hi"'), "plugin receives validated args");
+    }
+
+    const invalid = await executor.execute(
+      "plugin-invalid-1",
+      "hello_plugin",
+      { message: 123 },
+      { source: "local" },
+    );
+    assert(invalid.ok && !!invalid.result.isError, "plugin invalid args fail via Zod schema");
+
+    const denyExecutor = new ToolExecutor({
+      toolRegistry: registry,
+      policy: normalizePolicy({
+        profile: "dev",
+        allow_plugins: false,
+        require_confirmation: [],
+      }),
+      logger,
+      confirmationServer: confirmation,
+      toolTimeoutSeconds: 5,
+      pluginToolNames: ["hello_plugin"],
+    });
+
+    assert(
+      !denyExecutor.getEnabledTools().includes("hello_plugin"),
+      "disabled policy hides plugin from enabled tools",
+    );
+    const denied = await denyExecutor.execute(
+      "plugin-deny-1",
+      "hello_plugin",
+      { message: "hi" },
+      { source: "local" },
+    );
+    assert(!denied.ok, "allow_plugins=false denies plugin execute");
+    if (!denied.ok) {
+      assert(
+        denied.message.includes("allow_plugins=false"),
+        "plugin deny message names allow_plugins=false",
+      );
+    }
+  } finally {
+    logger.shutdown();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 async function main(): Promise<void> {
   console.log("desktop-daemon smoke tests");
   testBlockedCommands();
@@ -1425,6 +1594,7 @@ async function main(): Promise<void> {
   await testControlUi();
   testCapabilitiesMatrix();
   testSecurityMatrixWave4();
+  await testCustomToolPlugins();
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) {
