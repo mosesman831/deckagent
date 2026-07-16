@@ -20,7 +20,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/src/index.js",
-    "test": "npm run build && node dist/test.js && node dist/policy-lock.test.js",
+    "test": "npm run build && node dist/test.js && node dist/policy-lock.test.js && node dist/rotation.test.js",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

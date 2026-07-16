@@ -25,7 +25,15 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm install
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Check bundled Worker assets
+        run: npm run check:worker-assets
 
       - name: Build + type-check core packages
         run: npm run build
@@ -55,9 +63,13 @@ jobs:
         env:
           CI: true
 
+      - name: Pack smoke
+        run: npm run pack:smoke
+        env:
+          CI: true
+
       - name: Install + test + build v2-extension
         run: |
-          npm install --workspace=packages/v2-extension
           npm run test --workspace=packages/v2-extension
           npm run build --workspace=packages/v2-extension
         env:

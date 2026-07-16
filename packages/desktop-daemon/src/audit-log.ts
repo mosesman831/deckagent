@@ -4,10 +4,12 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   renameSync,
   statSync,
+  unlinkSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 export type AuditSource = "tunnel" | "local";
 export type AuditOutcome = "ok" | "error";
@@ -23,7 +25,8 @@ export interface AuditEntry {
   source: AuditSource;
 }
 
-const DEFAULT_MAX_BYTES = 50 * 1024 * 1024;
+const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
+const DEFAULT_KEEP_FILES = 5;
 const MAX_STRING_LEN = 200;
 
 /**
@@ -149,12 +152,14 @@ function summarizeValue(
 export interface AuditLogOptions {
   /** Override log directory (tests). Default: ~/.deckagent/logs */
   logDir?: string;
-  /** Rotate when file exceeds this size. Default: 50MB */
+  /** Rotate when file exceeds this size. Default: 10MB */
   maxBytes?: number;
+  /** Number of rotated audit files to retain. Default: 5 */
+  keepFiles?: number;
 }
 
 /**
- * Append one JSON line to audit.jsonl. Rotates to audit.jsonl.1 when oversized.
+ * Append one JSON line to audit.jsonl. Rotates at 10MB and keeps 5 backups.
  * Best-effort — never throws to callers.
  */
 export function appendAuditLog(
@@ -165,12 +170,13 @@ export function appendAuditLog(
     const logDir = options?.logDir ?? join(homedir(), ".deckagent", "logs");
     const path = join(logDir, "audit.jsonl");
     const maxBytes = options?.maxBytes ?? DEFAULT_MAX_BYTES;
+    const keepFiles = options?.keepFiles ?? DEFAULT_KEEP_FILES;
 
     if (!existsSync(logDir)) {
       mkdirSync(logDir, { recursive: true });
     }
 
-    rotateIfNeeded(path, maxBytes);
+    rotateIfNeeded(path, maxBytes, keepFiles);
 
     const line = JSON.stringify(entry) + "\n";
     appendFileSync(path, line, { encoding: "utf-8", mode: 0o600 });
@@ -179,7 +185,7 @@ export function appendAuditLog(
   }
 }
 
-function rotateIfNeeded(path: string, maxBytes: number): void {
+function rotateIfNeeded(path: string, maxBytes: number, keepFiles: number): void {
   if (!existsSync(path)) return;
   let size: number;
   try {
@@ -189,12 +195,56 @@ function rotateIfNeeded(path: string, maxBytes: number): void {
   }
   if (size < maxBytes) return;
 
-  const rotated = `${path}.1`;
   try {
-    // Simple single-backup rotation: overwrite previous .1 if present.
-    renameSync(path, rotated);
+    rotateBackups(path, keepFiles);
   } catch {
     // If rotation fails, keep appending.
+  }
+}
+
+function rotateBackups(path: string, keepFiles: number): void {
+  const keep = Math.max(0, Math.floor(keepFiles));
+  cleanupRotatedAuditLogs(path, keep);
+  if (keep === 0) {
+    unlinkSync(path);
+    return;
+  }
+
+  const oldest = `${path}.${keep}`;
+  if (existsSync(oldest)) {
+    unlinkSync(oldest);
+  }
+
+  for (let i = keep - 1; i >= 1; i--) {
+    const from = `${path}.${i}`;
+    const to = `${path}.${i + 1}`;
+    if (!existsSync(from)) continue;
+    if (existsSync(to)) {
+      unlinkSync(to);
+    }
+    renameSync(from, to);
+  }
+
+  renameSync(path, `${path}.1`);
+  cleanupRotatedAuditLogs(path, keep);
+}
+
+function cleanupRotatedAuditLogs(path: string, keepFiles: number): void {
+  const dir = dirname(path);
+  if (!existsSync(dir)) return;
+  const base = basename(path).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const rotatedPattern = new RegExp(`^${base}\\.(\\d+)$`);
+  for (const entry of readdirSync(dir)) {
+    const match = rotatedPattern.exec(entry);
+    if (!match) continue;
+    const index = Number(match[1]);
+    if (!Number.isInteger(index) || index < 1 || index > keepFiles) {
+      try {
+        unlinkSync(join(dir, entry));
+      } catch {
+        // Ignore cleanup errors.
+      }
+    }
   }
 }
 

@@ -12,6 +12,12 @@ import { dirname, join, basename } from "node:path";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
+export interface LoggerOptions {
+  logDir?: string;
+  maxBytes?: number;
+  keepFiles?: number;
+}
+
 const LOG_LEVELS: Record<LogLevel, number> = {
   debug: 0,
   info: 1,
@@ -28,10 +34,12 @@ export class Logger {
   private maxBytes = 10 * 1024 * 1024;
   private keepFiles = 5;
 
-  constructor(level: LogLevel = "info", foreground = false) {
+  constructor(level: LogLevel = "info", foreground = false, options: LoggerOptions = {}) {
     this.level = level;
     this.foreground = foreground;
-    this.logDir = join(homedir(), ".deckagent", "logs");
+    this.logDir = options.logDir ?? join(homedir(), ".deckagent", "logs");
+    this.maxBytes = options.maxBytes ?? this.maxBytes;
+    this.keepFiles = options.keepFiles ?? this.keepFiles;
     this.currentPath = this.logPathForDate(new Date());
     this.ensureLogDir();
   }
@@ -116,8 +124,9 @@ export class Logger {
   }
 
   private cleanupOldLogs(): void {
-    const files = readdirSync(this.logDir)
-      .filter((f) => f.startsWith("deckagent-") && f.endsWith(".log"))
+    const rotatedLogPattern = /^deckagent-\d{4}-\d{2}-\d{2}\.log\.\d+$/;
+    const rotated = readdirSync(this.logDir)
+      .filter((f) => rotatedLogPattern.test(f))
       .map((f) => ({ name: f, path: join(this.logDir, f), mtime: 0 }))
       .filter((f) => {
         try {
@@ -129,7 +138,6 @@ export class Logger {
       })
       .sort((a, b) => a.mtime - b.mtime);
 
-    const rotated = files.filter((f) => f.name.includes(".log."));
     while (rotated.length > this.keepFiles) {
       const oldest = rotated.shift();
       if (!oldest) break;

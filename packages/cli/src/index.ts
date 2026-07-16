@@ -4,17 +4,15 @@ import process from 'node:process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runSetup, cleanConfig } from './setup.js';
+import { runSetup } from './setup.js';
 import {
   runDaemonForeground,
   startDaemon,
   stopDaemon,
   isDaemonRunning,
-  uninstallDaemonService,
   installDaemonService,
   tailLogs
 } from './install-daemon.js';
-import { askYesNo, getConfigDir } from './configure.js';
 import { runDoctor } from './doctor.js';
 import { runTunnel } from './tunnel.js';
 import { runWorkspaceCommand } from './workspace.js';
@@ -23,6 +21,7 @@ import { runPolicyCommand } from './policy-cmd.js';
 import { runDeviceCommand } from './device-cmd.js';
 import { openControlUi } from './ui.js';
 import { runPluginCommand } from './plugin.js';
+import { runUninstall } from './uninstall.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -63,7 +62,8 @@ Usage:
   deckagent plugin list        List custom tool plugins
   deckagent ui                 Open local control UI (http://127.0.0.1:9150)
   deckagent doctor [--watch]   Check DeckAgent health and prerequisites
-  deckagent uninstall          Stop daemon and remove config
+  deckagent uninstall [--dry-run] [--keep-config] [--keep-logs] [--delete-worker] [--unregister-device] [--yes]
+                               Stop daemon and safely remove local state
   deckagent version            Print version
   deckagent help               Print this help message
 `);
@@ -192,20 +192,7 @@ async function main(): Promise<void> {
     }
 
     case 'uninstall': {
-      console.log(`This will stop the daemon and remove ${getConfigDir()}/`);
-      const undeploy = await askYesNo('Also undeploy the Cloudflare Worker? (requires wrangler)');
-      if (undeploy) {
-        try {
-          const { execSync } = await import('node:child_process');
-          const { resolveWorkerPackageDir } = await import('./deploy-worker.js');
-          execSync('npx wrangler delete', { cwd: resolveWorkerPackageDir(), stdio: 'inherit' });
-        } catch (err) {
-          console.warn('Could not undeploy worker:', err instanceof Error ? err.message : String(err));
-        }
-      }
-      uninstallDaemonService();
-      cleanConfig();
-      console.log('DeckAgent uninstalled.');
+      await runUninstall(args.slice(1));
       break;
     }
 
