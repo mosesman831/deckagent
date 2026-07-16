@@ -7,12 +7,14 @@ import { fileURLToPath } from 'node:url';
 import { runSetup, cleanConfig } from './setup.js';
 import {
   runDaemonForeground,
+  startDaemon,
   stopDaemon,
   isDaemonRunning,
   uninstallDaemonService,
+  installDaemonService,
   tailLogs
 } from './install-daemon.js';
-import { askYesNo } from './configure.js';
+import { askYesNo, getConfigDir } from './configure.js';
 import { runDoctor } from './doctor.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -32,15 +34,33 @@ function printHelp(): void {
 
 Usage:
   deckagent setup              Run the full setup wizard
-  deckagent daemon [--foreground]  Start the desktop daemon
+  deckagent daemon [--foreground]  Start the desktop daemon (background by default)
   deckagent daemon --stop      Stop the desktop daemon
   deckagent daemon --status    Check if the daemon is running
-  deckagent logs               Tail daemon logs
+  deckagent logs [--follow] [--lines N]  Tail daemon logs (follows on TTY by default)
   deckagent doctor             Check DeckAgent health and prerequisites
   deckagent uninstall          Stop daemon and remove config
   deckagent version            Print version
   deckagent help               Print this help message
 `);
+}
+
+function parseLogsOptions(args: string[]): { follow?: boolean; lines?: number } {
+  const options: { follow?: boolean; lines?: number } = {};
+  if (args.includes('--follow') || args.includes('-f')) {
+    options.follow = true;
+  }
+  if (args.includes('--no-follow')) {
+    options.follow = false;
+  }
+  const linesIndex = args.indexOf('--lines');
+  if (linesIndex >= 0 && args[linesIndex + 1]) {
+    const n = parseInt(args[linesIndex + 1], 10);
+    if (!Number.isNaN(n) && n > 0) {
+      options.lines = n;
+    }
+  }
+  return options;
 }
 
 async function main(): Promise<void> {
@@ -76,13 +96,17 @@ async function main(): Promise<void> {
       } else if (args.includes('--foreground')) {
         runDaemonForeground();
       } else {
-        runDaemonForeground();
+        // Ensure service unit/task exists, then start in background.
+        installDaemonService();
+        startDaemon();
+        console.log('Daemon started in background. Use `deckagent daemon --status` or `deckagent logs`.');
       }
       break;
     }
 
     case 'logs': {
-      tailLogs();
+      const options = parseLogsOptions(args.slice(1));
+      tailLogs(options);
       break;
     }
 
@@ -92,7 +116,7 @@ async function main(): Promise<void> {
     }
 
     case 'uninstall': {
-      console.log('This will stop the daemon and remove ~/.deckagent/');
+      console.log(`This will stop the daemon and remove ${getConfigDir()}/`);
       const undeploy = await askYesNo('Also undeploy the Cloudflare Worker? (requires wrangler)');
       if (undeploy) {
         try {

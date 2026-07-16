@@ -4,4 +4,7 @@ export {
   setDevice,
   removeDevice,
   updateDeviceStatus,
+  isDeviceOnline,
+  listOnlineDevices,
+  resolveTargetDeviceId,
 } from "./device-registry.js";

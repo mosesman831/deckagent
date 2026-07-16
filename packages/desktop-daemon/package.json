@@ -10,7 +10,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "node dist/src/index.js",
+    "test": "npm run build && node dist/test.js"
   },
   "dependencies": {
     "@deckagent/mcp-server": "file:../mcp-server",

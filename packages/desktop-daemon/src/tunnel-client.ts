@@ -1,20 +1,13 @@
 import WebSocket from "ws";
-import type { ToolRegistry } from "@deckagent/mcp-server";
 import type { Config } from "./config.js";
-import type { Policy, PolicyResult } from "./policy.js";
 import type { Logger } from "./logger.js";
-import { checkToolAllowed } from "./policy.js";
+import type { ToolExecutor } from "./tool-executor.js";
 
 interface ExecuteToolMessage {
   type: "execute_tool";
   id: string;
   tool: string;
   args: Record<string, unknown>;
-}
-
-interface ToolResultPayload {
-  content: Array<{ type: string; text: string }>;
-  isError?: boolean;
 }
 
 export type ConnectionState =
@@ -31,8 +24,7 @@ const HEARTBEAT_GRACE_MS = 2000;
 export class TunnelClient {
   private ws: WebSocket | null = null;
   private config: Config;
-  private toolRegistry: ToolRegistry;
-  private policy: Policy;
+  private executor: ToolExecutor;
   private logger: Logger;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private heartbeatTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
@@ -44,18 +36,11 @@ export class TunnelClient {
     reject: (err: Error) => void;
   } | null = null;
   private state: ConnectionState = "stopped";
-  private activeExecutions = new Map<string, AbortController>();
   private bufferedData = "";
 
-  constructor(
-    config: Config,
-    toolRegistry: ToolRegistry,
-    policy: Policy,
-    logger: Logger,
-  ) {
+  constructor(config: Config, executor: ToolExecutor, logger: Logger) {
     this.config = config;
-    this.toolRegistry = toolRegistry;
-    this.policy = policy;
+    this.executor = executor;
     this.logger = logger;
   }
 
@@ -77,6 +62,8 @@ export class TunnelClient {
     } else if (url.protocol === "https:") {
       url.protocol = "wss:";
     }
+    // Multi-device Durable Objects route by device_id query param.
+    url.searchParams.set("device_id", this.config.device_id);
 
     this.logger.info(`Connecting to WebSocket tunnel: ${url.toString()}`);
 
@@ -103,10 +90,7 @@ export class TunnelClient {
     this.stopHeartbeat();
     this.stopHeartbeatTimeout();
 
-    for (const [id, controller] of this.activeExecutions) {
-      controller.abort();
-      this.activeExecutions.delete(id);
-    }
+    this.executor.abortAll();
 
     this.pendingAuth?.reject(new Error("Disconnected"));
     this.pendingAuth = null;
@@ -229,10 +213,7 @@ export class TunnelClient {
     this.stopHeartbeat();
     this.stopHeartbeatTimeout();
 
-    for (const [id, controller] of this.activeExecutions) {
-      controller.abort();
-      this.activeExecutions.delete(id);
-    }
+    this.executor.abortAll();
 
     this.state = "stopped";
 
@@ -340,130 +321,36 @@ export class TunnelClient {
   }
 
   private async executeTool(msg: ExecuteToolMessage): Promise<void> {
-    this.logger.info(`Executing tool: ${msg.tool}`);
+    const outcome = await this.executor.execute(msg.id, msg.tool, msg.args, {
+      onProgress: (chunk) => {
+        this.send({
+          type: "tool_progress",
+          id: msg.id,
+          chunk,
+        });
+      },
+    });
 
-    const preconfirmed = msg.args._preconfirmed === true;
-    const policyResult: PolicyResult = checkToolAllowed(
-      msg.tool,
-      msg.args,
-      this.policy,
-      preconfirmed,
-    );
-
-    if (!policyResult.allowed) {
-      this.send({
-        type: "tool_error",
-        id: msg.id,
-        error: {
-          code: "POLICY_BLOCKED",
-          message: policyResult.reason || "Blocked by policy",
-        },
-      });
-      return;
-    }
-
-    if (policyResult.requiresConfirmation) {
-      this.send({
-        type: "tool_error",
-        id: msg.id,
-        error: {
-          code: "CONFIRMATION_REQUIRED",
-          message:
-            policyResult.confirmationReason || "Confirmation required",
-        },
-      });
-      return;
-    }
-
-    const timeout = this.resolveTimeout(msg.tool, msg.args);
-    const controller = new AbortController();
-    this.activeExecutions.set(msg.id, controller);
-
-    const timeoutTimer = setTimeout(() => {
-      controller.abort();
-    }, timeout);
-
-    try {
-      const result = (await this.runWithAbort(
-        () => this.toolRegistry.execute(msg.tool, msg.args),
-        controller.signal,
-      )) as ToolResultPayload;
-
-      clearTimeout(timeoutTimer);
-      this.activeExecutions.delete(msg.id);
-
+    if (outcome.ok) {
       this.send({
         type: "tool_result",
         id: msg.id,
         result: {
-          content: result.content,
-          isError: result.isError,
+          content: outcome.result.content,
+          isError: outcome.result.isError,
         },
       });
-    } catch (err) {
-      clearTimeout(timeoutTimer);
-      this.activeExecutions.delete(msg.id);
-
-      if ((err as Error).name === "AbortError") {
-        this.send({
-          type: "tool_error",
-          id: msg.id,
-          error: {
-            code: "TOOL_TIMEOUT",
-            message: `Tool '${msg.tool}' timed out after ${timeout}ms`,
-          },
-        });
-      } else {
-        this.send({
-          type: "tool_error",
-          id: msg.id,
-          error: {
-            code: "INTERNAL_ERROR",
-            message: `Tool '${msg.tool}' failed: ${humanError(err)}`,
-          },
-        });
-      }
+      return;
     }
-  }
 
-  private runWithAbort<T>(
-    fn: () => Promise<T>,
-    signal: AbortSignal,
-  ): Promise<T> {
-    return new Promise((resolve, reject) => {
-      if (signal.aborted) {
-        const err = new Error("Aborted");
-        err.name = "AbortError";
-        reject(err);
-        return;
-      }
-
-      fn().then(resolve, reject);
-
-      signal.addEventListener("abort", () => {
-        const err = new Error("Aborted");
-        err.name = "AbortError";
-        reject(err);
-      });
+    this.send({
+      type: "tool_error",
+      id: msg.id,
+      error: {
+        code: outcome.code,
+        message: outcome.message,
+      },
     });
-  }
-
-  private resolveTimeout(
-    toolName: string,
-    args: Record<string, unknown>,
-  ): number {
-    if (
-      toolName === "execute_command" ||
-      toolName === "execute_command_stream"
-    ) {
-      const requested =
-        typeof args.timeout === "number"
-          ? args.timeout * 1000
-          : this.config.tool_timeout * 1000;
-      return Math.min(requested, this.policy.max_command_timeout * 1000);
-    }
-
-    return this.config.tool_timeout * 1000;
   }
 }
 

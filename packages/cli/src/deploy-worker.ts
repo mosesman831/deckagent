@@ -13,8 +13,45 @@ export interface WorkerConfig {
   apiToken: string;
 }
 
+const MISSING_WORKER_HINT =
+  'Cloudflare Worker package not found. Run deckagent from the DeckAgent monorepo, or install the full DeckAgent distribution so packages/cloudflare-worker is available next to the CLI.';
+
+/**
+ * Replace the KV namespace id for the DECK_KV binding.
+ * Matches any existing id value (empty, placeholder, or real id).
+ */
+export function applyKvNamespaceId(text: string, kvNamespaceId: string): string {
+  // binding then id (common wrangler.jsonc form)
+  const bindingThenId =
+    /("binding"\s*:\s*"DECK_KV"\s*,\s*"id"\s*:\s*")[^"]*(")/;
+  if (bindingThenId.test(text)) {
+    return text.replace(bindingThenId, `$1${kvNamespaceId}$2`);
+  }
+
+  // id then binding
+  const idThenBinding =
+    /("id"\s*:\s*")[^"]*("\s*,\s*"binding"\s*:\s*"DECK_KV")/;
+  if (idThenBinding.test(text)) {
+    return text.replace(idThenBinding, `$1${kvNamespaceId}$2`);
+  }
+
+  throw new Error(
+    'Could not find DECK_KV kv_namespaces binding with an "id" field in wrangler.jsonc'
+  );
+}
+
 export function resolveWorkerPackageDir(): string {
-  return path.resolve(__dirname, '..', '..', 'cloudflare-worker');
+  const candidate = path.resolve(__dirname, '..', '..', 'cloudflare-worker');
+  if (!fs.existsSync(candidate)) {
+    throw new Error(`${MISSING_WORKER_HINT}\nLooked for: ${candidate}`);
+  }
+  const wranglerPath = path.join(candidate, 'wrangler.jsonc');
+  if (!fs.existsSync(wranglerPath)) {
+    throw new Error(
+      `Worker package found at ${candidate} but wrangler.jsonc is missing.\n${MISSING_WORKER_HINT}`
+    );
+  }
+  return candidate;
 }
 
 export function readWorkerConfigTemplate(): string {
@@ -23,29 +60,38 @@ export function readWorkerConfigTemplate(): string {
   return fs.readFileSync(templatePath, 'utf-8');
 }
 
+/**
+ * Write the KV namespace id into the real wrangler.jsonc used by `wrangler deploy`.
+ * Backs up the previous file to wrangler.jsonc.bak and leaves the configured
+ * file in place so subsequent deploys keep the user's KV id.
+ */
 export function writeWorkerConfig(config: WorkerConfig): string {
   const workerDir = resolveWorkerPackageDir();
-  const templatePath = path.join(workerDir, 'wrangler.jsonc');
-  const stagingPath = path.join(workerDir, 'wrangler.jsonc.cli');
+  const configPath = path.join(workerDir, 'wrangler.jsonc');
+  const backupPath = path.join(workerDir, 'wrangler.jsonc.bak');
 
-  let text = fs.readFileSync(templatePath, 'utf-8');
+  let text = fs.readFileSync(configPath, 'utf-8');
 
   if (config.kvNamespaceId) {
-    text = text.replace(
-      /"kv_namespaces"\s*:\s*\[\s*\{\s*"binding"\s*:\s*"DECK_KV"\s*,\s*"id"\s*:\s*""\s*\}\s*\]/,
-      `"kv_namespaces": [{ "binding": "DECK_KV", "id": "${config.kvNamespaceId}" }]`
-    );
+    text = applyKvNamespaceId(text, config.kvNamespaceId);
   }
 
-  fs.writeFileSync(stagingPath, text, 'utf-8');
-  return stagingPath;
+  if (!fs.existsSync(backupPath)) {
+    fs.copyFileSync(configPath, backupPath);
+  }
+
+  fs.writeFileSync(configPath, text, 'utf-8');
+  return configPath;
 }
 
+/** Restore wrangler.jsonc from wrangler.jsonc.bak if a backup exists. */
 export function restoreWorkerConfig(): void {
   const workerDir = resolveWorkerPackageDir();
-  const stagingPath = path.join(workerDir, 'wrangler.jsonc.cli');
-  if (fs.existsSync(stagingPath)) {
-    fs.unlinkSync(stagingPath);
+  const configPath = path.join(workerDir, 'wrangler.jsonc');
+  const backupPath = path.join(workerDir, 'wrangler.jsonc.bak');
+  if (fs.existsSync(backupPath)) {
+    fs.copyFileSync(backupPath, configPath);
+    fs.unlinkSync(backupPath);
   }
 }
 
@@ -121,25 +167,22 @@ export function deployWorker(config: WorkerConfig): DeployResult {
     kvId = kv.id;
   }
 
-  const stagingPath = writeWorkerConfig({ ...config, kvNamespaceId: kvId });
+  // Writes into the real wrangler.jsonc (backed up once) and leaves KV id in place.
+  writeWorkerConfig({ ...config, kvNamespaceId: kvId });
 
-  try {
-    setWranglerSecret('API_TOKEN', config.apiToken, workerDir);
+  setWranglerSecret('API_TOKEN', config.apiToken, workerDir);
 
-    console.log('Deploying worker...');
-    const output = execSync('npx wrangler deploy', {
-      cwd: workerDir,
-      encoding: 'utf-8',
-      stdio: 'pipe'
-    });
+  console.log('Deploying worker...');
+  const output = execSync('npx wrangler deploy', {
+    cwd: workerDir,
+    encoding: 'utf-8',
+    stdio: 'pipe'
+  });
 
-    const urlMatch = output.match(/https:\/\/([a-z0-9-]+\.workers\.dev|[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev)/i);
-    if (!urlMatch) {
-      throw new Error('Could not parse deployed worker URL from wrangler output.\n' + output);
-    }
-
-    return { url: urlMatch[0] };
-  } finally {
-    restoreWorkerConfig();
+  const urlMatch = output.match(/https:\/\/([a-z0-9-]+\.workers\.dev|[a-z0-9-]+\.[a-z0-9-]+\.workers\.dev)/i);
+  if (!urlMatch) {
+    throw new Error('Could not parse deployed worker URL from wrangler output.\n' + output);
   }
+
+  return { url: urlMatch[0] };
 }

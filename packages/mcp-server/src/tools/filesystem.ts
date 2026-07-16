@@ -27,6 +27,20 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+/** Default 10 MiB; daemon may lower via setMaxFileReadSize. */
+let maxFileReadSize = 10 * 1024 * 1024;
+
+export function setMaxFileReadSize(bytes: number): void {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    throw new Error("max file read size must be a positive number");
+  }
+  maxFileReadSize = Math.floor(bytes);
+}
+
+export function getMaxFileReadSize(): number {
+  return maxFileReadSize;
+}
+
 function expandHome(input: string): string {
   if (input === "~" || input.startsWith("~/")) {
     return path.join(os.homedir(), input.slice(1));
@@ -64,6 +78,18 @@ export async function read_file(args: ReadFileArgs): Promise<ToolResponse> {
     if (!stat.isFile()) {
       return {
         content: [{ type: "text", text: `Not a file: ${filePath}` }],
+        isError: true,
+      };
+    }
+
+    if (stat.size > maxFileReadSize) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `File too large to read: ${filePath} (${stat.size} bytes exceeds limit of ${maxFileReadSize} bytes)`,
+          },
+        ],
         isError: true,
       };
     }
@@ -340,7 +366,11 @@ export async function read_multiple_files(args: ReadMultipleFilesArgs): Promise<
   for (const p of parsed.paths.slice(0, 10)) {
     const res = await read_file({ path: p, offset: 1, limit: 500 });
     results.push(`--- ${p} ---`);
-    results.push(res.content.map((c) => c.text).join("\n"));
+    results.push(
+      res.content
+        .map((c) => (c.type === "text" ? c.text : `[image ${c.mimeType}]`))
+        .join("\n"),
+    );
   }
 
   return {

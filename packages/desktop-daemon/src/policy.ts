@@ -1,8 +1,7 @@
 import { z } from "zod";
 import { homedir } from "node:os";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { dirname, join, resolve as resolvePath, isAbsolute } from "node:path";
-import { realpathSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, realpathSync } from "node:fs";
+import { dirname, join, resolve as resolvePath, isAbsolute, normalize, sep } from "node:path";
 
 export const PolicySchema = z.object({
   version: z.number().int().default(1),
@@ -13,9 +12,12 @@ export const PolicySchema = z.object({
     "shutdown",
     "reboot",
     "poweroff",
-    "init",
+    "init 0",
+    "init 6",
     "dd",
     "mkfs",
+    "curl|sh",
+    "wget|sh",
   ]),
   require_confirmation: z.array(z.string()).default([
     "execute_command",
@@ -63,6 +65,35 @@ const BROWSER_TOOLS = new Set([
   "browser_click",
   "browser_evaluate",
 ]);
+
+/** Tools that omit path in schemas default to home (~). */
+const PATH_DEFAULTS: Record<string, Record<string, string>> = {
+  search_files: { path: "~" },
+};
+
+/**
+ * Hardcoded dangerous patterns checked in addition to policy.blocked_commands.
+ * Matching runs against a whitespace-collapsed, lowercased command string.
+ */
+const DANGEROUS_COMMAND_PATTERNS: RegExp[] = [
+  /\bsudo\b/,
+  /\bdoas\b/,
+  /\brkexec\b/,
+  /\bmkfs(\.\w+)?\b/,
+  /\bdd\b[\s\S]*\bif=/,
+  /\bif=\/[^\s]*\b[\s\S]*\bdd\b/,
+  /\bshutdown\b/,
+  /\breboot\b/,
+  /\bpoweroff\b/,
+  /\bhalt\b/,
+  /:\s*\(\s*\)\s*\{/, // fork bomb :(){
+  /\bfork\s*\(\s*\)\s*\{/, // crude fork bomb variants
+  /\b(curl|wget)\b[\s\S]*\|\s*(?:ba|z|da)?sh\b/,
+  /\b(curl|wget)\b[\s\S]*\|\s*python(?:3)?\b/,
+  /\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*)\s+\/(\s|$|[*])/,
+  /\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*|-[a-zA-Z]*f[a-zA-Z]*r[a-zA-Z]*)\s+\/\*/,
+  /\bchmod\s+(-[a-zA-Z]*\s+)?777\s+\/(\s|$)/,
+];
 
 export function getPolicyPath(): string {
   return join(homedir(), ".deckagent", "policy.json");
@@ -119,11 +150,98 @@ export function writePolicy(policy: Policy, path = getPolicyPath()): void {
   }
 }
 
+/** Collapse whitespace and lowercase for command matching. */
+export function normalizeCommand(command: string): string {
+  return command.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Returns true if the command matches a blocked entry or a known dangerous pattern.
+ * Keeps substring checks for policy list entries, and adds word-boundary matching
+ * for single-token blocks plus common bypass patterns.
+ */
+export function isCommandBlocked(
+  command: string,
+  blockedList: string[],
+): { blocked: boolean; matched?: string } {
+  const normalized = normalizeCommand(command);
+  if (!normalized) {
+    return { blocked: false };
+  }
+
+  // Strip common obfuscation: zero-width / control chars already gone via normalize;
+  // also collapse "$()" wrappers lightly by checking raw patterns on normalized form.
+  for (const pattern of DANGEROUS_COMMAND_PATTERNS) {
+    if (pattern.test(normalized)) {
+      return { blocked: true, matched: pattern.source };
+    }
+  }
+
+  for (const blocked of blockedList) {
+    const entry = normalizeCommand(blocked);
+    if (!entry) continue;
+
+    // Pipe-style entries like "curl|sh" → match curl ... | sh
+    if (entry.includes("|") && !entry.includes(" ")) {
+      const parts = entry.split("|").map((p) => p.trim()).filter(Boolean);
+      if (parts.length >= 2) {
+        const left = escapeRegex(parts[0]!);
+        const right = escapeRegex(parts[parts.length - 1]!);
+        const pipePattern = new RegExp(
+          `\\b${left}\\b[\\s\\S]*\\|\\s*(?:ba|z|da)?${right}\\b`,
+        );
+        if (pipePattern.test(normalized)) {
+          return { blocked: true, matched: blocked };
+        }
+      }
+    }
+
+    // Substring check (legacy / explicit multi-word blocks)
+    if (normalized.includes(entry)) {
+      return { blocked: true, matched: blocked };
+    }
+
+    // Word-boundary for single-token blocks (avoids matching inside longer words
+    // but still catches `sudo` / `reboot` etc. as whole words)
+    if (!/\s/.test(entry) && !entry.includes("|")) {
+      const wordPattern = new RegExp(`(?:^|[^a-z0-9_])${escapeRegex(entry)}(?:[^a-z0-9_]|$)`);
+      if (wordPattern.test(normalized)) {
+        return { blocked: true, matched: blocked };
+      }
+    }
+  }
+
+  return { blocked: false };
+}
+
+/**
+ * Apply known schema defaults for omitted path arguments before policy checks.
+ * Mutates a shallow copy — does not mutate the caller's object.
+ */
+export function applyPathDefaults(
+  toolName: string,
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  const defaults = PATH_DEFAULTS[toolName];
+  if (!defaults) return { ...args };
+
+  const next = { ...args };
+  for (const [key, value] of Object.entries(defaults)) {
+    if (next[key] === undefined || next[key] === null || next[key] === "") {
+      next[key] = value;
+    }
+  }
+  return next;
+}
+
 export function checkToolAllowed(
   toolName: string,
   args: Record<string, unknown>,
   policy: Policy,
-  preconfirmed = false,
 ): PolicyResult {
   const allTools = new Set([
     "read_file",
@@ -151,7 +269,10 @@ export function checkToolAllowed(
   }
 
   if (policy.read_only && MUTATING_TOOLS.has(toolName)) {
-    return { allowed: false, reason: `Tool '${toolName}' is blocked because policy is read-only` };
+    return {
+      allowed: false,
+      reason: `Tool '${toolName}' is blocked because policy is read-only`,
+    };
   }
 
   if (!policy.allow_terminal && TERMINAL_TOOLS.has(toolName)) {
@@ -162,25 +283,25 @@ export function checkToolAllowed(
     return { allowed: false, reason: `Browser tools are disabled by policy` };
   }
 
-  const command = typeof args.command === "string" ? args.command : "";
+  const argsWithDefaults = applyPathDefaults(toolName, args);
+
+  const command = typeof argsWithDefaults.command === "string" ? argsWithDefaults.command : "";
   if (command) {
-    const lowerCommand = command.toLowerCase();
-    for (const blocked of policy.blocked_commands) {
-      if (lowerCommand.includes(blocked.toLowerCase())) {
-        return {
-          allowed: false,
-          reason: `Command blocked by policy: '${blocked}' is not allowed`,
-        };
-      }
+    const blockResult = isCommandBlocked(command, policy.blocked_commands);
+    if (blockResult.blocked) {
+      return {
+        allowed: false,
+        reason: `Command blocked by policy: matched '${blockResult.matched ?? "dangerous pattern"}'`,
+      };
     }
   }
 
-  const pathResult = checkPathAllowed(toolName, args, policy);
+  const pathResult = checkPathAllowed(toolName, argsWithDefaults, policy);
   if (!pathResult.allowed) {
     return pathResult;
   }
 
-  if (!preconfirmed && policy.require_confirmation.includes(toolName)) {
+  if (policy.require_confirmation.includes(toolName)) {
     const reason = command
       ? `Tool '${toolName}' with command '${command}' requires confirmation`
       : `Tool '${toolName}' requires confirmation`;
@@ -199,6 +320,7 @@ function checkPathAllowed(
   args: Record<string, unknown>,
   policy: Policy,
 ): PolicyResult {
+  void toolName;
   const pathKeys = ["path", "source", "destination", "workdir"];
 
   for (const key of pathKeys) {
@@ -228,7 +350,7 @@ function checkPathAllowed(
   return { allowed: true };
 }
 
-function isPathAllowed(inputPath: string, policy: Policy): boolean {
+export function isPathAllowed(inputPath: string, policy: Policy): boolean {
   const resolved = resolvePathWithHome(inputPath);
   let realPath: string;
 
@@ -238,17 +360,20 @@ function isPathAllowed(inputPath: string, policy: Policy): boolean {
     realPath = resolved;
   }
 
-  if (!isAbsolute(realPath)) {
+  const normalizedTarget = normalizePathForCompare(realPath);
+  if (!isAbsolute(normalizedTarget) && !isAbsolute(realPath)) {
     return false;
   }
 
   const allowedDirs = policy.allowed_directories.map((d) =>
-    resolvePathWithHome(d),
+    normalizePathForCompare(resolvePathWithHome(d)),
   );
 
   for (const allowed of allowedDirs) {
-    const normalizedAllowed = allowed.endsWith("/") ? allowed : allowed + "/";
-    if (realPath === allowed || realPath.startsWith(normalizedAllowed)) {
+    if (pathsEqual(normalizedTarget, allowed)) {
+      return true;
+    }
+    if (isPathInside(normalizedTarget, allowed)) {
       return true;
     }
   }
@@ -257,13 +382,42 @@ function isPathAllowed(inputPath: string, policy: Policy): boolean {
 }
 
 function resolvePathWithHome(inputPath: string): string {
-  if (inputPath.startsWith("~/")) {
-    return join(homedir(), inputPath.slice(2));
-  }
-  if (inputPath === "~") {
+  const trimmed = inputPath.trim();
+  if (trimmed === "~") {
     return homedir();
   }
-  return resolvePath(inputPath);
+  if (trimmed.startsWith("~/") || trimmed.startsWith("~\\")) {
+    return join(homedir(), trimmed.slice(2));
+  }
+  return resolvePath(trimmed);
+}
+
+/** Normalize separators and casing for cross-platform prefix checks. */
+function normalizePathForCompare(inputPath: string): string {
+  let normalized = normalize(inputPath);
+  // Unify separators to platform sep after normalize (handles mixed / and \)
+  if (sep === "\\") {
+    normalized = normalized.replace(/\//g, "\\");
+  } else {
+    normalized = normalized.replace(/\\/g, "/");
+  }
+  if (process.platform === "win32") {
+    normalized = normalized.toLowerCase();
+  }
+  // Strip trailing separator (except root)
+  if (normalized.length > 1 && normalized.endsWith(sep)) {
+    normalized = normalized.slice(0, -1);
+  }
+  return normalized;
+}
+
+function pathsEqual(a: string, b: string): boolean {
+  return a === b;
+}
+
+function isPathInside(target: string, allowedDir: string): boolean {
+  const prefix = allowedDir.endsWith(sep) ? allowedDir : allowedDir + sep;
+  return target.startsWith(prefix);
 }
 
 function humanError(err: unknown): string {

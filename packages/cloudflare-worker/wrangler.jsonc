@@ -1,10 +1,12 @@
 {
+  // KV namespace id is filled by `deckagent setup` / CLI (empty string placeholder).
+  // CLI replaces: "id": ""  with the real namespace id before deploy.
   "name": "deckagent",
   "main": "src/index.ts",
   "compatibility_date": "2026-06-01",
   "compatibility_flags": ["nodejs_compat"],
   "kv_namespaces": [
-    { "binding": "DECK_KV", "id": "a976361de2f94e5db7302cef849e87ab" }
+    { "binding": "DECK_KV", "id": "" }
   ],
   "durable_objects": {
     "bindings": [

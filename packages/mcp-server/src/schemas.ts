@@ -107,7 +107,11 @@ export type BrowserClickArgs = z.infer<typeof BrowserClickArgsSchema>;
 export type BrowserEvaluateArgs = z.infer<typeof BrowserEvaluateArgsSchema>;
 export type GetEnvironmentArgs = z.infer<typeof GetEnvironmentArgsSchema>;
 
+export type ToolContent =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+
 export interface ToolResponse {
-  content: Array<{ type: string; text: string }>;
+  content: ToolContent[];
   isError?: boolean;
 }

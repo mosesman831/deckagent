@@ -1,135 +1,214 @@
-// MCP tool list shared with the Durable Object tunnel handler.
-export const tools = [
-  {
-    name: "read_file",
-    description: "Read the complete contents of a file from the local filesystem.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        path: { type: "string", description: "Absolute path to the file" },
-        offset: { type: "number", description: "Line number to start from (1-indexed)", default: 1 },
-        limit: { type: "number", description: "Maximum lines to read", default: 500, maximum: 5000 },
+import type { Env } from "./types.js";
+import { JsonRpcCode } from "./types.js";
+import { TOOL_CATALOG, TOOL_NAMES } from "./tool-catalog.js";
+import { resolveTargetDeviceId } from "./device-registry.js";
+
+export { TOOL_CATALOG as tools } from "./tool-catalog.js";
+
+type JsonRpcId = string | number | null;
+
+function jsonRpcResponse(id: JsonRpcId, result: unknown, cors: HeadersInit): Response {
+  return new Response(JSON.stringify({ jsonrpc: "2.0", id, result }), {
+    headers: { "Content-Type": "application/json", ...cors },
+  });
+}
+
+/**
+ * JSON-RPC error with numeric code; DeckAgent string code in `data.code`.
+ */
+function jsonRpcError(
+  id: JsonRpcId,
+  deckCode: string,
+  message: string,
+  options: {
+    rpcCode?: number;
+    httpStatus?: number;
+    cors?: HeadersInit;
+  } = {}
+): Response {
+  const rpcCode = options.rpcCode ?? JsonRpcCode.SERVER_ERROR;
+  const httpStatus = options.httpStatus ?? 500;
+  const cors = options.cors ?? {};
+  return new Response(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id,
+      error: {
+        code: rpcCode,
+        message,
+        data: { code: deckCode },
       },
-      required: ["path"],
-    },
-  },
-  {
-    name: "write_file",
-    description: "Write content to a file, creating it if needed. OVERWRITES existing content.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        path: { type: "string", description: "Absolute path to the file" },
-        content: { type: "string", description: "Content to write" },
+    }),
+    { status: httpStatus, headers: { "Content-Type": "application/json", ...cors } }
+  );
+}
+
+function deckCodeToRpc(deckCode: string): number {
+  switch (deckCode) {
+    case "METHOD_NOT_FOUND":
+    case "TOOL_NOT_FOUND":
+      return JsonRpcCode.METHOD_NOT_FOUND;
+    case "INVALID_ARGUMENTS":
+    case "DEVICE_AMBIGUOUS":
+      return JsonRpcCode.INVALID_PARAMS;
+    case "DEVICE_OFFLINE":
+    case "TOOL_TIMEOUT":
+      return JsonRpcCode.SERVER_ERROR;
+    default:
+      return JsonRpcCode.SERVER_ERROR;
+  }
+}
+
+function deckCodeToHttp(deckCode: string): number {
+  switch (deckCode) {
+    case "METHOD_NOT_FOUND":
+    case "TOOL_NOT_FOUND":
+      return 404;
+    case "INVALID_ARGUMENTS":
+    case "DEVICE_AMBIGUOUS":
+      return 400;
+    case "DEVICE_OFFLINE":
+      return 503;
+    case "TOOL_TIMEOUT":
+      return 504;
+    default:
+      return 500;
+  }
+}
+
+/**
+ * Handle MCP Streamable HTTP at the Worker edge.
+ * initialize / tools/list are local; tools/call is routed to the device's DO.
+ */
+export async function handleMcpRequest(
+  request: Request,
+  env: Env,
+  cors: Record<string, string>
+): Promise<Response> {
+  if (request.method === "GET") {
+    return jsonRpcResponse("0", { tools: TOOL_CATALOG }, cors);
+  }
+
+  if (request.method !== "POST") {
+    return new Response("Method not allowed", {
+      status: 405,
+      headers: cors,
+    });
+  }
+
+  let body: {
+    jsonrpc?: string;
+    method?: string;
+    id?: JsonRpcId;
+    params?: {
+      name?: string;
+      arguments?: Record<string, unknown>;
+      deviceId?: string;
+    };
+  };
+  try {
+    body = await request.json();
+  } catch {
+    return jsonRpcError(null, "INVALID_ARGUMENTS", "Invalid JSON body", {
+      rpcCode: JsonRpcCode.PARSE_ERROR,
+      httpStatus: 400,
+      cors,
+    });
+  }
+
+  const method = body.method ?? "";
+  const id = body.id ?? null;
+
+  if (method === "initialize") {
+    return jsonRpcResponse(
+      id,
+      {
+        protocolVersion: "2024-11-05",
+        capabilities: { tools: {} },
+        serverInfo: { name: env.APP_NAME || "DeckAgent", version: "0.1.0" },
       },
-      required: ["path", "content"],
-    },
-  },
-  {
-    name: "edit_file",
-    description: "Surgical find-and-replace edit on a file.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        path: { type: "string" },
-        old_string: { type: "string" },
-        new_string: { type: "string" },
-        replace_all: { type: "boolean", default: false },
+      cors
+    );
+  }
+
+  if (method === "notifications/initialized") {
+    // MCP clients may send this; acknowledge with empty result.
+    return jsonRpcResponse(id, {}, cors);
+  }
+
+  if (method === "tools/list") {
+    return jsonRpcResponse(id, { tools: TOOL_CATALOG }, cors);
+  }
+
+  if (method === "tools/call") {
+    const toolName = body.params?.name;
+    const toolArgs = body.params?.arguments ?? {};
+    const requestedDeviceId = body.params?.deviceId;
+
+    if (!toolName || !TOOL_NAMES.has(toolName)) {
+      return jsonRpcError(
+        id,
+        "TOOL_NOT_FOUND",
+        `Tool '${toolName ?? ""}' not found`,
+        {
+          rpcCode: JsonRpcCode.METHOD_NOT_FOUND,
+          httpStatus: 404,
+          cors,
+        }
+      );
+    }
+
+    const resolved = await resolveTargetDeviceId(env, requestedDeviceId);
+    if ("error" in resolved) {
+      return jsonRpcError(id, resolved.error, resolved.message, {
+        rpcCode: deckCodeToRpc(resolved.error),
+        httpStatus: deckCodeToHttp(resolved.error),
+        cors,
+      });
+    }
+
+    const doId = env.TUNNEL_DO.idFromName(resolved.deviceId);
+    const stub = env.TUNNEL_DO.get(doId);
+
+    // Forward tools/call to the device's Durable Object for execution.
+    const forwardBody = JSON.stringify({
+      jsonrpc: "2.0",
+      id,
+      method: "tools/call",
+      params: {
+        name: toolName,
+        arguments: toolArgs,
+        deviceId: resolved.deviceId,
       },
-      required: ["path", "old_string", "new_string"],
-    },
-  },
-  {
-    name: "search_files",
-    description: "Search file contents using ripgrep.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        pattern: { type: "string" },
-        path: { type: "string", default: "~" },
-        file_glob: { type: "string" },
-        max_results: { type: "number", default: 50, maximum: 200 },
-      },
-      required: ["pattern"],
-    },
-  },
-  {
-    name: "list_directory",
-    description: "List files and directories in a path with metadata.",
-    inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
-  },
-  {
-    name: "create_directory",
-    description: "Create a directory and all parent directories.",
-    inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
-  },
-  {
-    name: "move_file",
-    description: "Move or rename a file or directory.",
-    inputSchema: { type: "object", properties: { source: { type: "string" }, destination: { type: "string" } }, required: ["source", "destination"] },
-  },
-  {
-    name: "get_file_info",
-    description: "Get metadata about a file or directory.",
-    inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
-  },
-  {
-    name: "read_multiple_files",
-    description: "Read up to 10 files in one call.",
-    inputSchema: { type: "object", properties: { paths: { type: "array", items: { type: "string" } } }, required: ["paths"] },
-  },
-  {
-    name: "execute_command",
-    description: "Execute a shell command and return its output.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        command: { type: "string" },
-        workdir: { type: "string" },
-        timeout: { type: "number", default: 60, maximum: 300 },
-        env: { type: "object", additionalProperties: { type: "string" } },
-      },
-      required: ["command"],
-    },
-  },
-  {
-    name: "execute_command_stream",
-    description: "Execute a command and stream output back in real-time.",
-    inputSchema: { type: "object", properties: { command: { type: "string" }, workdir: { type: "string" } }, required: ["command"] },
-  },
-  {
-    name: "list_processes",
-    description: "List running processes on the system.",
-    inputSchema: { type: "object", properties: { filter: { type: "string" } } },
-  },
-  {
-    name: "kill_process",
-    description: "Kill a process by PID. Requires confirmation by default.",
-    inputSchema: { type: "object", properties: { pid: { type: "number" }, signal: { type: "string", default: "SIGTERM" } }, required: ["pid"] },
-  },
-  {
-    name: "browser_navigate",
-    description: "Open a URL in the browser.",
-    inputSchema: { type: "object", properties: { url: { type: "string" }, headless: { type: "boolean", default: true } }, required: ["url"] },
-  },
-  {
-    name: "browser_screenshot",
-    description: "Take a screenshot of the current browser page.",
-    inputSchema: { type: "object", properties: { full_page: { type: "boolean", default: false } } },
-  },
-  {
-    name: "browser_click",
-    description: "Click an element on the page by selector.",
-    inputSchema: { type: "object", properties: { selector: { type: "string" } }, required: ["selector"] },
-  },
-  {
-    name: "browser_evaluate",
-    description: "Run JavaScript code in the browser page context.",
-    inputSchema: { type: "object", properties: { code: { type: "string" } }, required: ["code"] },
-  },
-  {
-    name: "get_environment",
-    description: "Get system environment information.",
-    inputSchema: { type: "object", properties: {} },
-  },
-];
+    });
+
+    const doResponse = await stub.fetch(
+      new Request("https://tunnel-do/mcp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: forwardBody,
+      })
+    );
+
+    // Ensure CORS headers on the proxied response.
+    const headers = new Headers(doResponse.headers);
+    for (const [k, v] of Object.entries(cors)) {
+      headers.set(k, v);
+    }
+    return new Response(doResponse.body, {
+      status: doResponse.status,
+      headers,
+    });
+  }
+
+  return jsonRpcError(
+    id,
+    "METHOD_NOT_FOUND",
+    `Method '${method}' not supported`,
+    {
+      rpcCode: JsonRpcCode.METHOD_NOT_FOUND,
+      httpStatus: 404,
+      cors,
+    }
+  );
+}

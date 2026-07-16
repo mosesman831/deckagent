@@ -29,6 +29,12 @@ export interface InterceptedResponse {
   headers: Record<string, string>;
   body: string;
   timestamp: number;
+  /** Present when reported from the content-script intercept path. */
+  adapterType?: string;
+  /** Tool calls parsed from the response body, if any. */
+  toolCalls?: ToolCall[];
+  /** Original (possibly transformed) request body for follow-up append. */
+  requestBody?: string;
 }
 
 export interface DaemonMessage {
@@ -76,6 +82,8 @@ export const DEFAULT_CONFIG: ExtensionConfig = {
   daemonPort: 9147,
   adapters: {
     deepseek: true,
-    qwen: true
+    qwen: true,
+    kimi: true,
+    zai: true
   }
 };

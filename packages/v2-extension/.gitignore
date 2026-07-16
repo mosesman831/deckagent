@@ -4,3 +4,8 @@ dist/
 .wxt/
 *.log
 .DS_Store
+# Placeholder icons (root .gitignore ignores *.png)
+!src/public/icon/
+!src/public/icon/*.png
+!public/icon/
+!public/icon/*.png

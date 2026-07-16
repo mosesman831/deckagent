@@ -1,5 +1,19 @@
 import type { Env } from "./src/types.js";
 import worker from "./src/index.js";
+import {
+  getDevice,
+  setDevice,
+  updateDeviceStatus,
+  authenticateDevice,
+  hashToken,
+  isDeviceOnline,
+  listOnlineDevices,
+} from "./src/device-registry.js";
+import { verifyApiToken } from "./src/auth.js";
+import { TOOL_CATALOG, TOOL_NAMES } from "./src/tool-catalog.js";
+import { tools as mcpHandlerTools } from "./src/mcp-handler.js";
+
+const API_TOKEN = "test-api-token-secret";
 
 // Minimal in-memory KV for local message-flow testing.
 class FakeKV {
@@ -8,40 +22,110 @@ class FakeKV {
   async get(key: string): Promise<string | null> {
     const entry = this.store.get(key);
     if (!entry) return null;
-    if (entry.expires && entry.expires < Date.now() / 1000) {
+    if (entry.expires !== undefined && entry.expires < Date.now() / 1000) {
       this.store.delete(key);
       return null;
     }
     return entry.value;
   }
 
-  async getJSON<T = unknown>(key: string): Promise<T | null> {
-    const raw = await this.get(key);
-    if (!raw) return null;
-    return JSON.parse(raw) as T;
-  }
-
-  async put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void> {
+  async put(
+    key: string,
+    value: string,
+    options?: { expirationTtl?: number }
+  ): Promise<void> {
     this.store.set(key, {
       value,
-      expires: options?.expirationTtl ? Math.floor(Date.now() / 1000) + options.expirationTtl : undefined,
+      expires: options?.expirationTtl
+        ? Math.floor(Date.now() / 1000) + options.expirationTtl
+        : undefined,
     });
   }
 
   async delete(key: string): Promise<void> {
     this.store.delete(key);
   }
+
+  async list(options?: {
+    prefix?: string;
+  }): Promise<{ keys: Array<{ name: string }> }> {
+    const prefix = options?.prefix ?? "";
+    const now = Date.now() / 1000;
+    const keys: Array<{ name: string }> = [];
+    for (const [name, entry] of this.store.entries()) {
+      if (entry.expires !== undefined && entry.expires < now) {
+        this.store.delete(name);
+        continue;
+      }
+      if (name.startsWith(prefix)) {
+        keys.push({ name });
+      }
+    }
+    return { keys };
+  }
+
+  /** Test helper: inspect whether a key has an expiration. */
+  hasExpiration(key: string): boolean {
+    const entry = this.store.get(key);
+    return entry?.expires !== undefined;
+  }
+
+  /** Test helper: force-expire presence keys for TTL simulation. */
+  forceExpire(key: string): void {
+    const entry = this.store.get(key);
+    if (entry) {
+      entry.expires = Math.floor(Date.now() / 1000) - 1;
+    }
+  }
 }
 
-function makeEnv(): Env {
+class FakeDurableObjectNamespace {
+  idFromName(name: string): { name: string } {
+    return { name };
+  }
+  get(_id: { name: string }): {
+    fetch: (request: Request) => Promise<Response>;
+  } {
+    return {
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: null,
+            error: {
+              code: -32000,
+              message: "Fake DO — no daemon connected",
+              data: { code: "DEVICE_OFFLINE" },
+            },
+          }),
+          { status: 503, headers: { "Content-Type": "application/json" } }
+        ),
+    };
+  }
+}
+
+function makeEnv(): Env & { _kv: FakeKV } {
+  const kv = new FakeKV();
   return {
-    DECK_KV: new FakeKV() as any,
-    GITHUB_CLIENT_ID: "test-client-id",
-    GITHUB_CLIENT_SECRET: "test-client-secret",
-    COOKIE_ENCRYPTION_KEY: "test-key-32-chars-minimum-required!!",
+    DECK_KV: kv as unknown as KVNamespace,
     APP_NAME: "DeckAgent",
-    DEPLOY_SECRET: "test-deploy-secret",
+    API_TOKEN,
+    TUNNEL_DO: new FakeDurableObjectNamespace() as unknown as DurableObjectNamespace,
+    _kv: kv,
   };
+}
+
+let passed = 0;
+let failed = 0;
+
+function assert(condition: boolean, label: string): void {
+  if (condition) {
+    console.log(`  PASS: ${label}`);
+    passed++;
+  } else {
+    console.error(`  FAIL: ${label}`);
+    failed++;
+  }
 }
 
 async function main() {
@@ -49,58 +133,191 @@ async function main() {
 
   const env = makeEnv();
   const url = (path: string) => new URL(`https://test.workers.dev${path}`);
-  const req = (method: string, path: string, body?: any) => ({
-    request: new Request(url(path), {
-      method,
-      headers: { "content-type": "application/json" },
-      body: body ? JSON.stringify(body) : undefined,
+
+  // --- 1. Auth ---
+  console.log("1. Auth (API token)");
+  assert(await verifyApiToken(API_TOKEN, env) === true, "valid token accepted");
+  assert(await verifyApiToken("wrong", env) === false, "invalid token rejected");
+  assert(await verifyApiToken("", env) === false, "empty token rejected");
+
+  const unauthRes = await worker.fetch(
+    new Request(url("/mcp"), { method: "GET" }),
+    env
+  );
+  assert(unauthRes.status === 401, `unauthenticated /mcp → 401 (got ${unauthRes.status})`);
+
+  const badAuthRes = await worker.fetch(
+    new Request(url("/mcp"), {
+      method: "GET",
+      headers: { authorization: "Bearer wrong-token" },
     }),
-    env,
-  });
+    env
+  );
+  assert(badAuthRes.status === 401, `bad bearer → 401 (got ${badAuthRes.status})`);
 
-  // 1. Health check
-  const healthRes = await worker.fetch(new Request(url("/health"), { method: "GET" }), env);
-  const health = await healthRes.json();
-  console.log("1. Health:", JSON.stringify(health));
-
-  // 2. Device registration
+  // --- 2. Device register / auth ---
+  console.log("\n2. Device registration & auth");
   const deviceId = "test-device-1";
   const deviceToken = "test-token-hex-deadbeef";
-  
-  const regReq = new Request(url("/api/devices"), {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "authorization": "Bearer test-deploy-secret",
-    },
-    body: JSON.stringify({
-      device_id: deviceId,
-      name: "Test Machine",
-      token: deviceToken,
-      capabilities: ["filesystem", "terminal"],
+
+  const regRes = await worker.fetch(
+    new Request(url("/api/devices"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${API_TOKEN}`,
+      },
+      body: JSON.stringify({
+        device_id: deviceId,
+        name: "Test Machine",
+        token: deviceToken,
+        capabilities: ["filesystem", "terminal"],
+      }),
     }),
+    env
+  );
+  assert(regRes.status === 200, `register → 200 (got ${regRes.status})`);
+  const regBody = (await regRes.json()) as { ok?: boolean; device_id?: string };
+  assert(regBody.ok === true && regBody.device_id === deviceId, "register body ok");
+
+  const device = await getDevice(env, deviceId);
+  assert(device !== null, "device stored in KV");
+  assert(device?.token_hash === (await hashToken(deviceToken)), "token_hash matches");
+
+  const authed = await authenticateDevice(env, deviceId, deviceToken);
+  assert(authed !== null, "authenticateDevice succeeds");
+  const badDevice = await authenticateDevice(env, deviceId, "wrong-token");
+  assert(badDevice === null, "authenticateDevice rejects bad token");
+
+  // --- 3. Status update without expiring registration ---
+  console.log("\n3. Status update does not expire registration");
+  await updateDeviceStatus(env, deviceId, "online");
+  assert(env._kv.hasExpiration(`device:${deviceId}`) === false, "device:{id} has no TTL");
+  assert(await isDeviceOnline(env, deviceId) === true, "presence key set");
+  assert(
+    (await listOnlineDevices(env)).includes(deviceId),
+    "listed in online devices"
+  );
+
+  // Simulate presence TTL expiry (unclean disconnect) — registration must remain.
+  env._kv.forceExpire(`device_online:${deviceId}`);
+  assert(await isDeviceOnline(env, deviceId) === false, "presence expired");
+  const stillRegistered = await getDevice(env, deviceId);
+  assert(stillRegistered !== null, "registration survives presence expiry");
+  assert(
+    stillRegistered?.token_hash === (await hashToken(deviceToken)),
+    "token_hash intact after presence expiry"
+  );
+
+  // Re-online and mark offline cleanly
+  await updateDeviceStatus(env, deviceId, "online");
+  await updateDeviceStatus(env, deviceId, "offline");
+  assert(await isDeviceOnline(env, deviceId) === false, "offline clears presence");
+  assert((await getDevice(env, deviceId)) !== null, "registration remains after offline");
+
+  // --- 4. Tool catalog ---
+  console.log("\n4. Tool catalog (single source)");
+  assert(TOOL_CATALOG.length === 18, `18 tools (got ${TOOL_CATALOG.length})`);
+  assert(TOOL_NAMES.has("execute_command_stream"), "has execute_command_stream");
+  assert(TOOL_NAMES.has("read_file"), "has read_file");
+  assert(TOOL_NAMES.has("get_environment"), "has get_environment");
+  assert(
+    mcpHandlerTools === TOOL_CATALOG ||
+      (mcpHandlerTools.length === TOOL_CATALOG.length &&
+        mcpHandlerTools.every((t, i) => t.name === TOOL_CATALOG[i].name)),
+    "mcp-handler re-exports catalog"
+  );
+
+  // --- 5. MCP tools/list with auth ---
+  console.log("\n5. MCP tools/list");
+  const toolsRes = await worker.fetch(
+    new Request(url("/mcp"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${API_TOKEN}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/list",
+      }),
+    }),
+    env
+  );
+  assert(toolsRes.status === 200, `tools/list → 200 (got ${toolsRes.status})`);
+  const toolsBody = (await toolsRes.json()) as {
+    jsonrpc?: string;
+    result?: { tools?: unknown[] };
+  };
+  assert(toolsBody.jsonrpc === "2.0", "jsonrpc 2.0");
+  assert(
+    Array.isArray(toolsBody.result?.tools) &&
+      toolsBody.result!.tools!.length === 18,
+    "tools/list returns 18 tools"
+  );
+
+  // CORS: Origin echoed, not *
+  console.log("\n6. CORS");
+  const corsRes = await worker.fetch(
+    new Request(url("/mcp"), {
+      method: "OPTIONS",
+      headers: { Origin: "https://chatgpt.com" },
+    }),
+    env
+  );
+  assert(
+    corsRes.headers.get("Access-Control-Allow-Origin") === "https://chatgpt.com",
+    "echoes Origin"
+  );
+  assert(
+    corsRes.headers.get("Access-Control-Allow-Origin") !== "*",
+    "does not use *"
+  );
+
+  // Tunnel requires device_id
+  console.log("\n7. Tunnel routing");
+  const tunnelMissing = await worker.fetch(
+    new Request(url("/tunnel"), {
+      method: "GET",
+      headers: { Upgrade: "websocket" },
+    }),
+    env
+  );
+  assert(
+    tunnelMissing.status === 400,
+    `/tunnel without device_id → 400 (got ${tunnelMissing.status})`
+  );
+
+  // Health
+  console.log("\n8. Health");
+  const healthRes = await worker.fetch(
+    new Request(url("/health"), { method: "GET" }),
+    env
+  );
+  const health = (await healthRes.json()) as { status?: string };
+  assert(health.status === "ok", "health ok");
+
+  // Direct setDevice + status (unit path)
+  console.log("\n9. Direct registry helpers");
+  await setDevice(env, "dev-2", {
+    id: "dev-2",
+    name: "Second",
+    status: "offline",
+    token_hash: await hashToken("tok2"),
+    capabilities: [],
+    last_seen: Date.now(),
   });
-  const regRes = await worker.fetch(regReq, env);
-  console.log("2. Device registration:", regRes.status, await regRes.text());
+  await updateDeviceStatus(env, "dev-2", "online");
+  await updateDeviceStatus(env, deviceId, "online");
+  const online = await listOnlineDevices(env);
+  assert(online.length === 2, `two online devices (got ${online.length})`);
 
-  // 3. MCP tools/list
-  const toolsReq = new Request(url("/mcp"), {
-    method: "GET",
-    headers: { "authorization": "Bearer test-session-token" },
-  });
-  const toolsRes = await worker.fetch(toolsReq, env);
-  console.log("3. MCP tools/list:", toolsRes.status);
-  if (toolsRes.ok) {
-    const tools = await toolsRes.json();
-    console.log("   Tools:", JSON.stringify(tools).substring(0, 200) + "...");
-  }
-
-  // 4. Unauthenticated request
-  const unauthReq = new Request(url("/mcp"), { method: "GET" });
-  const unauthRes = await worker.fetch(unauthReq, env);
-  console.log("4. Unauthenticated:", unauthRes.status);
-
-  console.log("\n=== Smoke test complete ===");
+  console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
+  if (failed > 0) process.exit(1);
 }
 
-main().catch(console.error);
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

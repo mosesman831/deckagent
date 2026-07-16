@@ -1,6 +1,6 @@
 {
   "name": "@deckagent/mcp-server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Shared MCP tool library for DeckAgent",
   "type": "module",
   "main": "dist/src/index.js",
@@ -36,15 +36,16 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "node --loader ts-node/esm test.ts"
+    "test": "npx tsx test.ts"
   },
   "dependencies": {
+    "playwright": "^1.49.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
     "@types/node": "^20.17.10",
-    "ts-node": "^10.9.2",
+    "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }
 }

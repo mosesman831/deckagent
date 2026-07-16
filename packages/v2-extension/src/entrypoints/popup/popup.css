@@ -1,26 +1,118 @@
 :root {
   --deck-bg: #0f172a;
   --deck-fg: #e2e8f0;
+  --deck-muted: #94a3b8;
   --deck-accent: #38bdf8;
+  --deck-ok: #4ade80;
+  --deck-bad: #f87171;
+  --deck-border: #1e293b;
 }
 
 body {
   margin: 0;
-  width: 320px;
-  min-height: 200px;
+  width: 300px;
+  min-height: 180px;
   background: var(--deck-bg);
   color: var(--deck-fg);
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
   padding: 1rem;
 }
 
 h1 {
-  margin: 0 0 0.5rem;
-  font-size: 1.25rem;
+  margin: 0 0 0.75rem;
+  font-size: 1.1rem;
   color: var(--deck-accent);
+  letter-spacing: 0.02em;
+}
+
+h2 {
+  margin: 0.85rem 0 0.4rem;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--deck-muted);
 }
 
 p {
   margin: 0 0 0.5rem;
   line-height: 1.4;
+  font-size: 0.85rem;
+}
+
+.muted {
+  color: var(--deck-muted);
+  font-size: 0.75rem;
+  word-break: break-all;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.9rem;
+}
+
+.toggle {
+  cursor: pointer;
+  user-select: none;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.dot.connected {
+  background: var(--deck-ok);
+}
+
+.dot.disconnected {
+  background: var(--deck-bad);
+}
+
+.status.disconnected {
+  color: var(--deck-bad);
+}
+
+.adapters {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.adapters li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0;
+  border-top: 1px solid var(--deck-border);
+  font-size: 0.85rem;
+}
+
+.badge {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  min-width: 1.6rem;
+  text-align: center;
+}
+
+.badge.on {
+  background: rgba(74, 222, 128, 0.15);
+  color: var(--deck-ok);
+}
+
+.badge.off {
+  background: rgba(248, 113, 113, 0.15);
+  color: var(--deck-bad);
+}
+
+input[type="checkbox"] {
+  accent-color: var(--deck-accent);
 }

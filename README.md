@@ -63,7 +63,7 @@ npx deckagent daemon --foreground
 - **18 tools** across filesystem, terminal, browser, and environment
 - **Policy engine** — allow/block directories, block dangerous commands, read-only mode, confirmation gates
 - **Zero configuration** — `deckagent setup` handles everything
-- **Cross-platform** — macOS, Linux, Windows
+- **Cross-platform** — macOS & Linux (LaunchAgent/systemd); Windows via scheduled task at logon
 
 ## How It Works
 
@@ -95,13 +95,17 @@ The Worker and daemon communicate through a Durable Object that acts as both the
 ## Security
 
 - Daemon runs as a **normal user process** — never root
-- All traffic is **HTTPS / WSS** — no open inbound ports on your machine
+- All traffic is **HTTPS / WSS** — no open inbound ports on your machine (Worker tunnel is outbound-only)
+- Local extension socket binds **`127.0.0.1:9147` only**
 - Tool execution is gated by a local **`policy.json`**:
   - `allowed_directories` — restrict where the AI can read/write
-  - `blocked_commands` — prevent dangerous shell commands
+  - `blocked_commands` — block dangerous shell patterns (normalized matching)
   - `read_only` — disable all mutation tools
-  - `require_confirmation` — require user approval for destructive actions
-- The Cloudflare Worker uses Bearer token auth — your API token is the only key
+  - `require_confirmation` — blocks until you approve in a local browser page (`http://127.0.0.1:9148/confirm/...`); remote `_preconfirmed` is ignored
+  - `allow_browser` / `allow_terminal` — feature gates
+  - `max_file_read_size` — caps file reads
+- The Cloudflare Worker uses Bearer token auth — treat `API_TOKEN` and device tokens as secrets
+- See [SECURITY.md](SECURITY.md) for reporting and operator hardening
 
 ## Comparison
 
@@ -184,9 +188,11 @@ npm run build
 
 ### System Prompt
 
-Paste this into your AI chat as the first message:
+Paste this into your AI chat as the first message (or use [`system_prompt.md`](system_prompt.md) for the full guide):
 
 > You have access to a local machine through DeckAgent. You can use these tools by outputting a JSON block with the format: `<<<TOOL>>>{"name":"tool_name","args":{...}}<<<END>>>`. Available tools: read_file, write_file, edit_file, search_files, list_directory, execute_command, get_environment, browser_navigate, browser_screenshot.
+
+Tool results appear in a page overlay and are queued into the next chat request. Keep the daemon running with the local tunnel on port `9147`.
 
 ### Disclaimer
 
@@ -206,12 +212,17 @@ npm run build
 cd packages/cloudflare-worker
 npx wrangler dev --port 8787
 # Then point your daemon at http://localhost:8787
+# Daemon must connect to /tunnel?device_id=<your-device-id>
+
+# Optional: enable browser tools
+npx playwright install chromium
+# Set allow_browser: true in ~/.deckagent/policy.json or pass --enable-browser
 
 # v2 extension testing
 cd packages/v2-extension
+npm install
 npm run build                    # builds to .output/chrome-mv3/
-npx tsx tests/deepseek.test.ts  # run adapter tests
-npx tsx tests/e2e-server.test.ts # run mock server E2E tests
+npm test                         # unit + adapter tests
 ```
 
 Five packages in an npm workspace:

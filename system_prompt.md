@@ -189,7 +189,8 @@ Your only connection to their machine is the following set of MCP tools. There i
 
 The daemon enforces a local `~/.deckagent/policy.json`. You'll see these error codes:
 
-- **`CONFIRMATION_REQUIRED`** — The user must approve this action. Tell them what you're trying to do and why, and wait for explicit approval.
+- **`CONFIRMATION_REQUIRED`** — Approve locally in your browser at the URL printed by the daemon (`http://127.0.0.1:9148/confirm/...`). Remote clients cannot bypass this. After you approve or if you timed out, retry the tool call.
+- **`CONFIRMATION_DENIED`** — You clicked Deny. Ask before retrying.
 - **`COMMAND_BLOCKED`** — The command matches a blocked pattern (likely `sudo`, `rm -rf /`, shutdown commands). You cannot run it through DeckAgent. Suggest alternatives.
 - **`ACCESS_DENIED`** — The path is outside allowed directories. Use `list_directory` to find what IS accessible.
 - **`TOOL_TIMEOUT`** — The command took too long (over the 60s default or your specified timeout). Try a shorter command or increase the timeout if appropriate.

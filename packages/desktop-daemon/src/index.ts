@@ -2,11 +2,20 @@
 import { existsSync, mkdirSync, writeFileSync, unlinkSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { createRegistry, type ToolRegistry } from "@deckagent/mcp-server";
+import {
+  createRegistry,
+  setBrowserEnabled,
+  setMaxFileReadSize,
+  killAllActiveCommands,
+  type ToolRegistry,
+} from "@deckagent/mcp-server";
 import { readConfig, getConfigPath } from "./config.js";
-import { readPolicy, getPolicyPath } from "./policy.js";
+import { readPolicy, getPolicyPath, type Policy } from "./policy.js";
 import { Logger } from "./logger.js";
 import { TunnelClient } from "./tunnel-client.js";
+import { ConfirmationServer } from "./confirmation-server.js";
+import { LocalTunnelServer } from "./local-server.js";
+import { ToolExecutor } from "./tool-executor.js";
 
 const DECK_DIR = join(homedir(), ".deckagent");
 const PID_FILE = join(DECK_DIR, "daemon.pid");
@@ -15,10 +24,11 @@ function printUsage(): void {
   console.log(`Usage: deckagent-daemon [options]
 
 Options:
-  --foreground    Run in foreground (log to stdout/stderr)
-  --stop          Stop a running daemon
-  --status        Check daemon status
-  --help          Show this help
+  --foreground       Run in foreground (log to stdout/stderr)
+  --enable-browser   Enable browser tools for this session (overrides policy.allow_browser)
+  --stop             Stop a running daemon
+  --status           Check daemon status
+  --help             Show this help
 `);
 }
 
@@ -94,6 +104,11 @@ function checkStatus(): void {
   process.exit(0);
 }
 
+function applyRuntimePolicy(policy: Policy, enableBrowserFlag: boolean): Policy {
+  if (!enableBrowserFlag) return policy;
+  return { ...policy, allow_browser: true };
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
@@ -113,6 +128,7 @@ async function main(): Promise<void> {
   }
 
   const foreground = args.includes("--foreground");
+  const enableBrowserFlag = args.includes("--enable-browser");
 
   if (!foreground) {
     // For v1, the daemon primarily runs in foreground mode. Background mode is
@@ -128,9 +144,9 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  let policy;
+  let policy: Policy;
   try {
-    policy = readPolicy();
+    policy = applyRuntimePolicy(readPolicy(), enableBrowserFlag);
   } catch (err) {
     console.error(`Failed to read policy: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
@@ -152,18 +168,68 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const client = new TunnelClient(config, toolRegistry, policy, logger);
+  // Honor browser enable flag / policy in mcp-server.
+  try {
+    setBrowserEnabled(policy.allow_browser);
+    setMaxFileReadSize(policy.max_file_read_size);
+  } catch (err) {
+    logger.warn(
+      `Failed to apply mcp-server runtime settings: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 
-  function shutdown(signal: string): void {
+  if (policy.allow_browser) {
+    logger.info("Browser tools enabled for this session");
+  } else {
+    logger.info("Browser tools disabled (policy.allow_browser=false; pass --enable-browser to enable)");
+  }
+
+  const confirmationServer = new ConfirmationServer(logger);
+  const executor = new ToolExecutor({
+    toolRegistry,
+    policy,
+    logger,
+    confirmationServer,
+    toolTimeoutSeconds: config.tool_timeout,
+  });
+
+  const localServer = new LocalTunnelServer(executor, logger);
+  const client = new TunnelClient(config, executor, logger);
+
+  let shuttingDown = false;
+
+  async function shutdown(signal: string): Promise<void> {
+    if (shuttingDown) return;
+    shuttingDown = true;
     logger.info(`Received ${signal}; shutting down gracefully`);
     client.disconnect();
+    executor.abortAll();
+    try {
+      await killAllActiveCommands();
+    } catch {
+      // ignore
+    }
+    try {
+      await localServer.stop();
+    } catch {
+      // ignore
+    }
+    try {
+      await confirmationServer.stop();
+    } catch {
+      // ignore
+    }
     logger.shutdown();
     removePid();
     process.exit(0);
   }
 
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
-  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => {
+    void shutdown("SIGTERM");
+  });
+  process.on("SIGINT", () => {
+    void shutdown("SIGINT");
+  });
 
   if (process.platform !== "win32") {
     process.on("SIGUSR1", () => {
@@ -175,12 +241,33 @@ async function main(): Promise<void> {
   process.on("uncaughtException", (err) => {
     logger.error(`Uncaught exception: ${err.message}`);
     writeCrashLog(err);
-    shutdown("uncaughtException");
+    void shutdown("uncaughtException");
   });
 
   process.on("unhandledRejection", (reason) => {
     logger.error(`Unhandled rejection: ${String(reason)}`);
   });
+
+  try {
+    await confirmationServer.start();
+  } catch (err) {
+    logger.error(
+      `Failed to start confirmation server: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    removePid();
+    process.exit(1);
+  }
+
+  try {
+    await localServer.start();
+  } catch (err) {
+    logger.error(
+      `Failed to start local tunnel server: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    await confirmationServer.stop();
+    removePid();
+    process.exit(1);
+  }
 
   if (config.auto_connect) {
     client.connect();

@@ -19,9 +19,25 @@ export const ConfigSchema = z.object({
 export const PolicySchema = z.object({
   version: z.number().int().default(1),
   allowed_directories: z.array(z.string()).default([]),
-  blocked_commands: z.array(z.string()).default([]),
-  require_confirmation: z.array(z.string()).default([]),
+  blocked_commands: z.array(z.string()).default([
+    'rm -rf',
+    'sudo',
+    'shutdown',
+    'reboot',
+    'poweroff',
+    'init',
+    'dd',
+    'mkfs'
+  ]),
+  require_confirmation: z.array(z.string()).default([
+    'execute_command',
+    'write_file',
+    'edit_file',
+    'move_file',
+    'kill_process'
+  ]),
   read_only: z.boolean().default(false),
+  // true: setup registers browser capabilities; daemon schema defaults false until policy is written
   allow_browser: z.boolean().default(true),
   allow_terminal: z.boolean().default(true),
   allow_computer_use: z.boolean().default(false),
@@ -71,11 +87,13 @@ export function generateConfig(deviceId: string, token: string, workerUrl: strin
 
 export function generateDefaultPolicy(): Policy {
   const home = os.homedir();
+  // Aligned with daemon PolicySchema: confirmation for mutating/dangerous tools.
+  // allow_browser defaults to true here because setup registers browser capabilities.
   return {
     version: 1,
     allowed_directories: [home],
-    blocked_commands: ['sudo', 'rm -rf /', 'mkfs', 'dd if=/dev/zero', ':(){ :|:& };:'],
-    require_confirmation: ['write_file', 'edit_file', 'move_file', 'kill_process', 'execute_command'],
+    blocked_commands: ['rm -rf', 'sudo', 'shutdown', 'reboot', 'poweroff', 'init', 'dd', 'mkfs'],
+    require_confirmation: ['execute_command', 'write_file', 'edit_file', 'move_file', 'kill_process'],
     read_only: false,
     allow_browser: true,
     allow_terminal: true,
@@ -85,10 +103,19 @@ export function generateDefaultPolicy(): Policy {
   };
 }
 
+function writeSecureJson(filePath: string, data: unknown): void {
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + '\n', { encoding: 'utf-8', mode: 0o600 });
+  try {
+    fs.chmodSync(filePath, 0o600);
+  } catch {
+    // chmod may fail on some Windows setups; mode on create is best-effort there.
+  }
+}
+
 export function writeConfigFiles(config: Config, policy: Policy): void {
   ensureConfigDir();
-  fs.writeFileSync(getConfigPath(), JSON.stringify(config, null, 2), 'utf-8');
-  fs.writeFileSync(getPolicyPath(), JSON.stringify(policy, null, 2), 'utf-8');
+  writeSecureJson(getConfigPath(), config);
+  writeSecureJson(getPolicyPath(), policy);
 }
 
 export function readConfig(): Config {

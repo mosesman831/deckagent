@@ -8,7 +8,6 @@ import {
   generateConfig,
   generateDefaultPolicy,
   writeConfigFiles,
-  askQuestion,
   askYesNo,
   maskSecret,
   getConfigDir
@@ -105,7 +104,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
 
     console.log('\n--- API Token ---');
     console.log(`Generated API token: ${maskSecret(apiToken)}`);
-    console.log('This token is stored as a Worker secret and in ~/.deckagent/config.json\n');
+    console.log(`This token is stored as a Worker secret and in ${getConfigDir()}/config.json\n`);
 
     const deviceId = crypto.randomUUID();
     const token = crypto.randomBytes(32).toString('hex');
@@ -124,7 +123,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
     const config = generateConfig(deviceId, token, workerUrl, apiToken);
     const policy = generateDefaultPolicy();
     writeConfigFiles(config, policy);
-    console.log('Wrote config files to ~/.deckagent/\n');
+    console.log(`Wrote config files to ${getConfigDir()}/\n`);
   }
 
   if (!workerUrl) {
@@ -152,15 +151,15 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
     console.log('Daemon is running ✓\n');
   } else {
     console.warn('Daemon may not be running yet. Check logs with `deckagent logs`.\n');
-    tailLogs();
+    tailLogs({ follow: false, lines: 50 });
   }
 
   const mcpUrl = `${workerUrl.replace(/\/$/, '')}/mcp`;
-  console.log('DeckAgent is set up! 🚀');
+  console.log('DeckAgent is set up!');
   console.log(`Your MCP URL: ${mcpUrl}`);
   console.log('In ChatGPT: Settings → Custom Connectors → Add → enter the URL above');
   console.log('In Claude:   Settings → Custom Connectors → Add → enter the URL above');
-  console.log(`Policy file: ~/.deckagent/policy.json (edit to restrict access)\n`);
+  console.log(`Policy file: ${getConfigDir()}/policy.json (edit to restrict access)\n`);
 }
 
 export function cleanConfig(): void {

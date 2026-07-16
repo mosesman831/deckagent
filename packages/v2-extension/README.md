@@ -1,28 +1,30 @@
 # DeckAgent v2 Chrome Extension
 
-Self-hosted MCP bridge browser extension.
+Self-hosted MCP bridge browser extension. Intercepts web AI chat API calls and routes tool execution through the local DeckAgent daemon (`ws://127.0.0.1:9147/tunnel`).
 
 ## Structure
 
-- `src/adapters/` — Chat adapter interface and built-in adapters (DeepSeek, Qwen).
-- `src/content-scripts/` — Fetch monkey-patch injected into supported chat pages.
-- `src/background.ts` — Service worker maintaining WebSocket connection to the local daemon.
-- `src/popup.html` / `src/popup.ts` — Extension popup.
-- `public/manifest.json` — Static Chrome extension manifest v3.
-- `wxt.config.ts` — WXT build configuration.
+- `src/adapters/` — Chat adapters (DeepSeek, Qwen, Kimi, Z.ai) + shared tool extract/append helpers
+- `src/lib/fetch-patch.ts` — MAIN-world `fetch` monkey-patch
+- `src/lib/messages.ts` — Bridge message types between worlds / background
+- `src/entrypoints/injected.content.ts` — MAIN world (patches page `fetch`)
+- `src/entrypoints/content.ts` — Isolated world (forwards to background via `chrome.runtime`)
+- `src/entrypoints/background.ts` — Service worker: daemon WS + tool execution loop
+- `src/entrypoints/popup/` — Status UI (daemon connection, adapters, enable toggle)
 
 ## Scripts
 
 ```bash
 npm install
 npm run dev      # WXT dev mode
-npm run build    # Production build
+npm run build    # Production build → .output/chrome-mv3
 npm run check    # TypeScript check
+npm test         # Unit tests (no Chrome required)
 ```
 
 ## How it works
 
-1. The content script installs a `fetch` monkey-patch on supported chat origins.
-2. Matched requests/responses are wrapped as `AdapterMessage` and reported to the background worker.
-3. The background worker forwards messages over a WebSocket (`ws://127.0.0.1:9147/tunnel`) to the DeckAgent desktop daemon.
-4. The daemon executes tools and returns JSON-RPC-line-delimited responses.
+1. **MAIN world** patches `window.fetch` on supported chat origins and reports request/response via `window.postMessage`.
+2. **Isolated world** listens for those messages and forwards them with `chrome.runtime.sendMessage`.
+3. **Background** connects to the daemon WebSocket, forwards intercepts, and when `<<<TOOL>>>…<<<END>>>` calls are detected, sends `execute_tool` and waits for `tool_result` / `tool_error`.
+4. Tool results are posted back to the page (overlay + queued for the next outbound chat request via `appendToolResult`).

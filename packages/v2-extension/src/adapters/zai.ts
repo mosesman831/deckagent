@@ -193,10 +193,21 @@ function appendResultToBody(body: string, toolContent: string): string {
 
 export const zaiAdapter: ChatAdapter = {
   name: "zai",
-  hostPattern: /z\.ai|chatglm\.cn|api\.z\.ai/i,
+  // Match z.ai (with or without subdomain), api.z.ai, and chatglm.cn hosts.
+  hostPattern: /^https?:\/\/([^/]+\.)?(z\.ai|chatglm\.cn)(\/|$)/i,
 
   match(url: string): boolean {
-    return this.hostPattern.test(url);
+    try {
+      const host = new URL(url).hostname.toLowerCase();
+      return (
+        host === "z.ai" ||
+        host.endsWith(".z.ai") ||
+        host === "chatglm.cn" ||
+        host.endsWith(".chatglm.cn")
+      );
+    } catch {
+      return this.hostPattern.test(url);
+    }
   },
 
   transformRequest(request: InterceptedRequest): InterceptedRequest {

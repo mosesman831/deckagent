@@ -44,13 +44,23 @@ export interface ExecuteToolMessage {
 export interface ToolResultMessage {
   type: "tool_result";
   id: string;
-  result?: { content: Array<{ type: string; text: string }>; isError?: boolean };
+  result?: {
+    content: Array<{ type: string; text: string }>;
+    isError?: boolean;
+  };
 }
 
 export interface ToolErrorMessage {
   type: "tool_error";
   id: string;
   error: { code: string; message: string };
+}
+
+/** Streaming progress chunks from execute_command_stream (before final tool_result). */
+export interface ToolProgressMessage {
+  type: "tool_progress";
+  id: string;
+  chunk: string;
 }
 
 export interface HeartbeatMessage {
@@ -74,6 +84,17 @@ export type TunnelMessage =
   | ExecuteToolMessage
   | ToolResultMessage
   | ToolErrorMessage
+  | ToolProgressMessage
   | HeartbeatMessage
   | HeartbeatAckMessage
   | StateUpdateMessage;
+
+/** JSON-RPC 2.0 standard / server error codes */
+export const JsonRpcCode = {
+  PARSE_ERROR: -32700,
+  INVALID_REQUEST: -32600,
+  METHOD_NOT_FOUND: -32601,
+  INVALID_PARAMS: -32602,
+  INTERNAL_ERROR: -32603,
+  SERVER_ERROR: -32000,
+} as const;

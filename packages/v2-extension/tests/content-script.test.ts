@@ -1,7 +1,6 @@
 import "./dom-test-bootstrap.js";
 import type {
   AdapterMessage,
-  ChatAdapter,
   InterceptedRequest,
   InterceptedResponse,
 } from "../src/adapters/types.js";
@@ -14,9 +13,7 @@ import {
   setupContentScript,
   pickAdapter,
   readRequestBody,
-  readResponseBody,
-  headersToRecord,
-} from "../src/entrypoints/content.js";
+} from "../src/lib/fetch-patch.js";
 
 let total = 0;
 let failed = 0;
@@ -104,12 +101,20 @@ function createMockPort(): MockPort {
 
 console.log("Content script fetch monkey-patch integration tests");
 
-test("adapter index registers deepseek, qwen, and kimi", () => {
-  assertEqual(ADAPTERS.length, 3);
+test("adapter index registers deepseek, qwen, kimi, and zai", () => {
+  assertEqual(ADAPTERS.length, 4);
   const names = ADAPTERS.map((a) => a.name);
   assertTrue(names.includes("deepseek"));
   assertTrue(names.includes("qwen"));
   assertTrue(names.includes("kimi"));
+  assertTrue(names.includes("zai"));
+});
+
+test("pickAdapter selects Z.ai for z.ai / chatglm URLs", () => {
+  assertEqual(pickAdapter("https://chat.z.ai/api/chat", ADAPTERS)?.name, "zai");
+  assertEqual(pickAdapter("https://z.ai/api/chat", ADAPTERS)?.name, "zai");
+  assertEqual(pickAdapter("https://api.z.ai/v1/chat/completions", ADAPTERS)?.name, "zai");
+  assertEqual(pickAdapter("https://chatglm.cn/api/chat", ADAPTERS)?.name, "zai");
 });
 
 test("pickAdapter selects Kimi for kimi URLs", () => {
@@ -421,28 +426,50 @@ test("setupContentScript installs and returns uninstall function", () => {
 test("background script forwards content-script messages to daemon", async () => {
   // Dynamic import of background script inside a mocked chrome.runtime environment.
   const { connectListeners } = createMockChromeRuntime();
+  const messageListeners: Array<
+    (message: unknown, sender: unknown, sendResponse: (r?: unknown) => void) => unknown
+  > = [];
+
   (globalThis as unknown as Record<string, unknown>).chrome = {
     runtime: {
       onConnect: {
         addListener: (fn: (port: MockPort) => void) => connectListeners.push(fn),
       },
-      onMessage: { addListener: () => void 0 },
+      onMessage: {
+        addListener: (
+          fn: (message: unknown, sender: unknown, sendResponse: (r?: unknown) => void) => unknown
+        ) => messageListeners.push(fn),
+      },
     },
-    tabs: { onUpdated: { addListener: () => {} }, query: async () => [] },
+    tabs: {
+      onUpdated: { addListener: () => {} },
+      query: async () => [],
+      sendMessage: async () => {},
+    },
     scripting: { executeScript: async () => {} },
+    storage: {
+      local: {
+        get: async () => ({}),
+        set: async () => {},
+      },
+    },
   } as Record<string, unknown>;
 
   let socketSendData: string | null = null;
-  const wsInstances: Array<{ handlers: Record<string, () => void> }> = [];
+  const wsInstances: Array<{
+    handlers: Record<string, Array<(...args: unknown[]) => void>>;
+    readyState: number;
+  }> = [];
   (globalThis as unknown as Record<string, unknown>).WebSocket = class MockWebSocket {
     static OPEN = 1;
-    readyState = 1;
-    handlers: Record<string, () => void> = {};
+    readyState = 0;
+    handlers: Record<string, Array<(...args: unknown[]) => void>> = {};
     constructor() {
       wsInstances.push(this);
     }
-    addEventListener(event: string, handler: () => void) {
-      this.handlers[event] = handler;
+    addEventListener(event: string, handler: (...args: unknown[]) => void) {
+      if (!this.handlers[event]) this.handlers[event] = [];
+      this.handlers[event].push(handler);
     }
     send(data: string) {
       socketSendData = data;
@@ -458,7 +485,10 @@ test("background script forwards content-script messages to daemon", async () =>
   // Wait for init to create the WebSocket, then simulate open.
   await new Promise((resolve) => setTimeout(resolve, 50));
   assertTrue(wsInstances.length >= 1, "WebSocket was created");
-  wsInstances[0].handlers.open();
+  wsInstances[0].readyState = 1;
+  for (const handler of wsInstances[0].handlers.open ?? []) {
+    handler();
+  }
 
   const port = createMockPort();
   for (const listener of connectListeners) {
@@ -468,7 +498,7 @@ test("background script forwards content-script messages to daemon", async () =>
   const adapterMessage: AdapterMessage = {
     id: "msg-1",
     type: "request",
-    payload: { test: true },
+    payload: { id: "req-1", adapterType: "deepseek", body: "{}", url: "", method: "POST", headers: {}, timestamp: Date.now() },
     timestamp: Date.now(),
     source: "content-script",
   };
@@ -483,6 +513,17 @@ test("background script forwards content-script messages to daemon", async () =>
   assertEqual(sent.id, adapterMessage.id);
   assertEqual(sent.method, "intercepted_adapter_message");
   assertEqual(sent.params.source, "content-script");
+
+  // Also verify runtime.onMessage adapter_message path
+  socketSendData = null;
+  for (const listener of messageListeners) {
+    listener(
+      { type: "adapter_message", message: { ...adapterMessage, id: "msg-2" } },
+      { tab: { id: 1 } },
+      () => {}
+    );
+  }
+  assertTrue(socketSendData !== null, "onMessage adapter_message forwarded to daemon");
 });
 
 console.log("\nWaiting for async tests...");

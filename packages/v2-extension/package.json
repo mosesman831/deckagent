@@ -12,6 +12,8 @@
     "zip:chrome": "wxt zip -b chrome",
     "check": "tsc --noEmit",
     "lint": "eslint . --ext .ts,.tsx",
+    "test": "tsx tests/content-script.test.ts && tsx tests/deepseek.test.ts && tsx tests/qwen.test.ts && tsx tests/kimi.test.ts && tsx tests/zai.test.ts",
+    "test:unit": "npm test",
     "clean": "rm -rf .output dist node_modules/.cache"
   },
   "devDependencies": {

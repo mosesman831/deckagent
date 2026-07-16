@@ -22,14 +22,38 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+          cache: npm
 
       - name: Install dependencies
         run: npm install
 
-      - name: Build + type-check all packages
+      - name: Build + type-check core packages
         run: npm run build
 
-      - name: Run mcp-server smoke test
+      - name: Test mcp-server
         run: npm run test --workspace=packages/mcp-server
+        env:
+          CI: true
+
+      - name: Test cloudflare-worker
+        run: npm run test --workspace=packages/cloudflare-worker
+        env:
+          CI: true
+
+      - name: Test desktop-daemon
+        run: npm run test --workspace=packages/desktop-daemon
+        env:
+          CI: true
+
+      - name: Test cli
+        run: npm run test --workspace=packages/cli
+        env:
+          CI: true
+
+      - name: Install + test + build v2-extension
+        run: |
+          npm install --workspace=packages/v2-extension
+          npm run test --workspace=packages/v2-extension
+          npm run build --workspace=packages/v2-extension
         env:
           CI: true
