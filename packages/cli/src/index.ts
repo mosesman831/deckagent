@@ -48,6 +48,7 @@ Usage:
   deckagent tunnel [--name NAME] [--url URL]  Cloudflare Tunnel to local wrangler (dev)
   deckagent device list        List registered devices from the Worker
   deckagent device prefer <id> Set sticky preferred device
+  deckagent device revoke <id> [--yes]  Revoke a device on the Worker
   deckagent device clear       Clear sticky preferred device
   deckagent token rotate [--deploy]  Rotate the Worker Bearer API token
   deckagent workspace use <path>  Set active workspace (project scope)

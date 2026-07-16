@@ -18,6 +18,7 @@ export const ConfigSchema = z.object({
   token: z.string().min(32),
   worker_url: z.string().url(),
   device_name: z.string().min(1),
+  api_token: z.string().min(32).optional(),
   heartbeat_interval: z.number().int().min(5).max(300).default(15),
   tool_timeout: z.number().int().min(1).max(300).default(60),
   auto_connect: z.boolean().default(true),

@@ -5,7 +5,7 @@ import {
   type Config
 } from './configure.js';
 
-const PreferredDeviceIdSchema = z.string().uuid();
+const DeviceIdSchema = z.string().uuid();
 
 export interface DeviceSummary {
   id: string;
@@ -46,8 +46,8 @@ function workerApiUrl(config: Config, pathname: string): URL {
   return new URL(pathname, config.worker_url);
 }
 
-function parsePreferredDeviceId(raw: string): string {
-  const result = PreferredDeviceIdSchema.safeParse(raw);
+function parseDeviceId(raw: string): string {
+  const result = DeviceIdSchema.safeParse(raw);
   if (!result.success) {
     throw new Error('Invalid device_id. Expected a UUID.');
   }
@@ -134,7 +134,7 @@ export async function preferWorkerDevice(
   deviceId: string,
   fetchImpl: FetchLike = getFetch()
 ): Promise<void> {
-  const preferredDeviceId = parsePreferredDeviceId(deviceId);
+  const preferredDeviceId = parseDeviceId(deviceId);
   await requestWorkerJson<{ ok?: boolean; preferred_device_id?: string }>(
     config,
     '/api/devices/prefer',
@@ -150,6 +150,20 @@ export async function clearWorkerPreferredDevice(
   await requestWorkerJson<{ ok?: boolean; preferred_device_id?: null }>(
     config,
     '/api/devices/prefer',
+    { method: 'DELETE' },
+    fetchImpl
+  );
+}
+
+export async function revokeWorkerDevice(
+  config: Config,
+  deviceId: string,
+  fetchImpl: FetchLike = getFetch()
+): Promise<void> {
+  const revokeDeviceId = parseDeviceId(deviceId);
+  await requestWorkerJson<{ ok?: boolean }>(
+    config,
+    `/api/devices/${encodeURIComponent(revokeDeviceId)}`,
     { method: 'DELETE' },
     fetchImpl
   );
@@ -182,6 +196,7 @@ function printHelp(): void {
   console.log(`Usage:
   deckagent device list
   deckagent device prefer <device_id>
+  deckagent device revoke <device_id> [--yes]
   deckagent device clear
 `);
 }
@@ -213,11 +228,34 @@ export async function runDeviceCommand(
       if (!rawDeviceId) {
         throw new Error('Missing device_id. Usage: deckagent device prefer <device_id>');
       }
-      const preferredDeviceId = parsePreferredDeviceId(rawDeviceId);
+      const preferredDeviceId = parseDeviceId(rawDeviceId);
       const config = readConfig();
       await preferWorkerDevice(config, preferredDeviceId, fetchImpl);
       writeConfig({ ...config, preferred_device_id: preferredDeviceId });
       console.log(`Preferred device set: ${preferredDeviceId}`);
+      break;
+    }
+
+    case 'revoke': {
+      const rawDeviceId = args[1];
+      if (!rawDeviceId) {
+        throw new Error('Missing device_id. Usage: deckagent device revoke <device_id> [--yes]');
+      }
+      const revokeDeviceId = parseDeviceId(rawDeviceId);
+      const yes = args.includes('--yes') || args.includes('-y');
+      const config = readConfig();
+      if (revokeDeviceId === config.device_id && !yes) {
+        throw new Error(
+          'Refusing to revoke this device without --yes. Self-revoke will unregister this daemon until you run setup again.'
+        );
+      }
+      if (revokeDeviceId === config.device_id) {
+        console.warn(
+          'Warning: revoking this device will disconnect the daemon until you run `deckagent setup` again.'
+        );
+      }
+      await revokeWorkerDevice(config, revokeDeviceId, fetchImpl);
+      console.log(`Device revoked: ${revokeDeviceId}`);
       break;
     }
 
@@ -231,6 +269,6 @@ export async function runDeviceCommand(
     }
 
     default:
-      throw new Error(`Unknown device command: ${sub}. Use: list | prefer | clear`);
+      throw new Error(`Unknown device command: ${sub}. Use: list | prefer | revoke | clear`);
   }
 }

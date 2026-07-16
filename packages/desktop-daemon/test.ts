@@ -1728,6 +1728,18 @@ async function testControlUi(): Promise<void> {
   recordToolOk();
 
   let policy = createDefaultPolicy();
+  const deviceConfig = {
+    device_id: "11111111-1111-4111-8111-111111111111",
+    token: "t".repeat(32),
+    worker_url: "https://example.workers.dev",
+    device_name: "test-device",
+    api_token: "a".repeat(32),
+    heartbeat_interval: 15,
+    tool_timeout: 60,
+    auto_connect: true,
+    log_level: "error" as const,
+  };
+  const workerDeleteCalls: Array<{ input: string | URL; method?: string; auth?: string }> = [];
   const control = new ControlUiServer({
     logger,
     confirmationServer: confirmation,
@@ -1745,6 +1757,18 @@ async function testControlUi(): Promise<void> {
     getPolicy: () => policy,
     setPolicy: (p) => {
       policy = p;
+    },
+    getDeviceConfig: () => deviceConfig,
+    fetch: async (input, init) => {
+      workerDeleteCalls.push({
+        input,
+        method: init?.method,
+        auth: init?.headers?.Authorization,
+      });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
     },
     uiTokenDir,
   });
@@ -1798,6 +1822,49 @@ async function testControlUi(): Promise<void> {
     assertEqual(status.worker_url, "https://example.workers.dev", "status worker_url");
     assertEqual(status.pending_approvals, 0, "no pending initially");
     assert(typeof status.daemon_version === "string", "daemon_version present");
+
+    const localDeviceRes = await fetch("http://127.0.0.1:19151/api/local/device");
+    assert(localDeviceRes.ok, "GET /api/local/device ok");
+    const localDevice = (await localDeviceRes.json()) as {
+      device_id?: string;
+      device_name?: string;
+      worker_url?: string;
+      api_token?: string;
+    };
+    assertEqual(localDevice.device_id, deviceConfig.device_id, "local device id returned");
+    assertEqual(localDevice.device_name, deviceConfig.device_name, "local device name returned");
+    assertEqual(localDevice.worker_url, deviceConfig.worker_url, "local worker_url returned");
+    assertEqual(localDevice.api_token, undefined, "local device endpoint omits api_token");
+
+    const revokeNoToken = await fetch("http://127.0.0.1:19151/api/local/device/revoke", {
+      method: "POST",
+    });
+    assertEqual(revokeNoToken.status, 401, "device revoke without UI token → 401");
+    assertEqual(workerDeleteCalls.length, 0, "unauthorized revoke does not call Worker");
+
+    const revokeRes = await fetch("http://127.0.0.1:19151/api/local/device/revoke", {
+      method: "POST",
+      headers: {
+        "X-DeckAgent-UI-Token": uiToken,
+        Origin: "http://127.0.0.1:19151",
+      },
+    });
+    assert(revokeRes.ok, "device revoke with valid UI token ok");
+    const revokeBody = (await revokeRes.json()) as { ok?: boolean; device_id?: string };
+    assertEqual(revokeBody.ok, true, "device revoke response ok");
+    assertEqual(revokeBody.device_id, deviceConfig.device_id, "device revoke response id");
+    assertEqual(workerDeleteCalls.length, 1, "device revoke calls Worker once");
+    assertEqual(
+      String(workerDeleteCalls[0]!.input),
+      `https://example.workers.dev/api/devices/${deviceConfig.device_id}`,
+      "device revoke Worker URL"
+    );
+    assertEqual(workerDeleteCalls[0]!.method, "DELETE", "device revoke uses DELETE");
+    assertEqual(
+      workerDeleteCalls[0]!.auth,
+      `Bearer ${deviceConfig.api_token}`,
+      "device revoke uses Bearer api_token"
+    );
 
     const metricsNoToken = await fetch("http://127.0.0.1:19151/api/metrics");
     assertEqual(metricsNoToken.status, 401, "GET /api/metrics without token → 401");

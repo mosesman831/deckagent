@@ -36,12 +36,30 @@ export interface ControlUiStatus {
   pending_approvals: number;
 }
 
+export interface ControlUiDeviceConfig {
+  device_id: string;
+  device_name: string;
+  worker_url: string;
+  api_token?: string;
+}
+
+type FetchLike = (
+  input: string | URL,
+  init?: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+  },
+) => Promise<Response>;
+
 export interface ControlUiOptions {
   logger: Logger;
   confirmationServer: ConfirmationServer;
   getStatus: () => ControlUiStatus;
   getPolicy: () => Policy;
   setPolicy: (policy: Policy) => void;
+  getDeviceConfig?: () => ControlUiDeviceConfig | null;
+  fetch?: FetchLike;
   host?: string;
   port?: number;
   /** Override audit log dir (tests). */
@@ -63,6 +81,8 @@ export class ControlUiServer {
   private getStatus: () => ControlUiStatus;
   private getPolicy: () => Policy;
   private setPolicy: (policy: Policy) => void;
+  private getDeviceConfig: () => ControlUiDeviceConfig | null;
+  private fetchImpl: FetchLike;
   private host: string;
   private port: number;
   private auditLogDir?: string;
@@ -76,6 +96,8 @@ export class ControlUiServer {
     this.getStatus = options.getStatus;
     this.getPolicy = options.getPolicy;
     this.setPolicy = options.setPolicy;
+    this.getDeviceConfig = options.getDeviceConfig ?? (() => null);
+    this.fetchImpl = options.fetch ?? getFetch();
     this.host = options.host ?? CONTROL_UI_HOST;
     this.port = options.port ?? CONTROL_UI_PORT;
     this.auditLogDir = options.auditLogDir;
@@ -152,6 +174,21 @@ export class ControlUiServer {
 
       if (method === "GET" && url.pathname === "/api/status") {
         sendJson(res, 200, this.getStatus());
+        return;
+      }
+
+      if (method === "GET" && url.pathname === "/api/local/device") {
+        sendJson(res, 200, localDevicePublic(this.getDeviceConfig()));
+        return;
+      }
+
+      if (method === "POST" && url.pathname === "/api/local/device/revoke") {
+        if (!this.authorizeMutation(req, res)) return;
+        const result = await revokeLocalDevice(
+          this.getDeviceConfig(),
+          this.fetchImpl,
+        );
+        sendJson(res, 200, result);
         return;
       }
 
@@ -405,6 +442,83 @@ function applyPolicySubset(
   return next;
 }
 
+function localDevicePublic(
+  config: ControlUiDeviceConfig | null,
+): Record<string, unknown> {
+  if (!config) {
+    return {
+      device_id: null,
+      device_name: null,
+      worker_url: null,
+    };
+  }
+  return {
+    device_id: config.device_id,
+    device_name: config.device_name,
+    worker_url: config.worker_url,
+  };
+}
+
+async function revokeLocalDevice(
+  config: ControlUiDeviceConfig | null,
+  fetchImpl: FetchLike,
+): Promise<Record<string, unknown>> {
+  if (!config) {
+    throw new Error("Device config is unavailable. Run `deckagent setup` first.");
+  }
+  if (!config.api_token) {
+    throw new Error("Worker API token is missing from config. Run `deckagent setup` again.");
+  }
+
+  const response = await fetchImpl(
+    new URL(`/api/devices/${encodeURIComponent(config.device_id)}`, config.worker_url),
+    {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${config.api_token}`,
+        Accept: "application/json",
+      },
+    },
+  );
+
+  let payload: unknown = {};
+  try {
+    payload = await response.json();
+  } catch {
+    if (!response.ok) {
+      throw new Error(`Worker returned a non-JSON response (HTTP ${response.status}).`);
+    }
+  }
+
+  const body =
+    payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : {};
+  if (!response.ok) {
+    throw new Error(responseErrorMessage(response.status, body));
+  }
+
+  return {
+    ok: true,
+    device_id: config.device_id,
+  };
+}
+
+function responseErrorMessage(status: number, payload: Record<string, unknown>): string {
+  const message = payload.message;
+  if (typeof message === "string" && message.trim()) return message;
+  const error = payload.error;
+  if (typeof error === "string" && error.trim()) return error;
+  return `Worker request failed with HTTP ${status}`;
+}
+
+function getFetch(): FetchLike {
+  if (typeof fetch !== "function") {
+    throw new Error("Control UI device revoke requires Node.js fetch support. Use Node 18 or newer.");
+  }
+  return fetch;
+}
+
 function isLoopbackHost(host: string): boolean {
   const h = host.trim().toLowerCase();
   return h === "127.0.0.1" || h === "::1" || h === "localhost";
@@ -620,6 +734,7 @@ function renderDashboard(): string {
     }
     button.approve { background: #1a7f37; }
     button.deny { background: #cf222e; margin-left: 8px; }
+    button.revoke { background: #cf222e; margin-top: 10px; }
     button.toggle {
       background: #243044;
       color: var(--text);
@@ -650,6 +765,10 @@ function renderDashboard(): string {
     <section>
       <h2>Status</h2>
       <div id="status" class="empty">Loading…</div>
+    </section>
+    <section>
+      <h2>Devices</h2>
+      <div id="device" class="empty">Loading…</div>
     </section>
     <section>
       <h2>Policy</h2>
@@ -690,6 +809,36 @@ function renderDashboard(): string {
           (s.workspace ? esc(s.workspace.name + " — " + s.workspace.root) : "none") +
         '</span></div>' +
         '<div class="row"><span class="label">Pending approvals</span><span>' + esc(s.pending_approvals) + '</span></div>';
+    }
+
+    async function refreshDevice() {
+      const d = await fetchJson("/api/local/device");
+      const el = document.getElementById("device");
+      if (!d.device_id) {
+        el.innerHTML = '<p class="empty">No local device config found.</p>';
+        return;
+      }
+      el.innerHTML =
+        '<div class="row"><span class="label">Device ID</span><span>' + esc(d.device_id) + '</span></div>' +
+        '<div class="row"><span class="label">Name</span><span>' + esc(d.device_name || "—") + '</span></div>' +
+        '<div class="row"><span class="label">Worker</span><span>' + esc(d.worker_url || "—") + '</span></div>' +
+        '<button class="revoke" id="revoke-device">Revoke on Worker</button>' +
+        '<p class="empty" id="device-message"></p>';
+      const btn = document.getElementById("revoke-device");
+      btn.addEventListener("click", async function () {
+        if (!confirm("Revoke this device on the Worker? The daemon will lose registration until setup runs again.")) {
+          return;
+        }
+        const msg = document.getElementById("device-message");
+        msg.textContent = "Revoking...";
+        const res = await fetch("/api/local/device/revoke", { method: "POST" });
+        const body = await res.json().catch(function () { return {}; });
+        if (!res.ok) {
+          msg.textContent = body.error || "Revoke failed";
+          return;
+        }
+        msg.textContent = "Device revoked on Worker.";
+      });
     }
 
     async function refreshApprovals() {
@@ -797,7 +946,7 @@ function renderDashboard(): string {
 
     async function tick() {
       try {
-        await Promise.all([refreshStatus(), refreshApprovals(), refreshAudit(), refreshPolicy()]);
+        await Promise.all([refreshStatus(), refreshDevice(), refreshApprovals(), refreshAudit(), refreshPolicy()]);
       } catch (e) {
         console.error(e);
       }

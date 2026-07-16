@@ -323,6 +323,7 @@ async function main(): Promise<void> {
         pending_approvals: confirmationServer.pendingCount(),
       };
     },
+    getDeviceConfig: () => config,
     getPolicy: () => executor.getPolicy(),
     setPolicy: (next) => {
       // Normalize on every Control UI update (read_only forces terminal/browser off).

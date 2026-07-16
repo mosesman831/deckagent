@@ -7,10 +7,12 @@ import {
   clearWorkerPreferredDevice,
   listWorkerDevices,
   preferWorkerDevice,
+  revokeWorkerDevice,
   runDeviceCommand
 } from '../dist/device-cmd.js';
 
 const preferredDeviceId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+const selfDeviceId = '11111111-1111-4111-8111-111111111111';
 
 function baseConfig(overrides = {}) {
   return {
@@ -88,6 +90,25 @@ async function testClearWorkerPreferredDevice() {
   await clearWorkerPreferredDevice(baseConfig({ preferred_device_id: preferredDeviceId }), fetchImpl);
 }
 
+async function testRevokeWorkerDevice() {
+  const fetchImpl = async (input, init) => {
+    assert.equal(
+      String(input),
+      `https://deckagent.example.workers.dev/api/devices/${preferredDeviceId}`
+    );
+    assert.equal(init.method, 'DELETE');
+    assert.equal(init.body, undefined);
+    assert.equal(init.headers.Authorization, `Bearer ${'a'.repeat(32)}`);
+    return jsonResponse({ ok: true });
+  };
+
+  await revokeWorkerDevice(baseConfig(), preferredDeviceId, fetchImpl);
+  await assert.rejects(
+    () => revokeWorkerDevice(baseConfig(), 'not-a-uuid', fetchImpl),
+    /Expected a UUID/
+  );
+}
+
 async function testRunDeviceCommandWritesConfig() {
   const writes = [];
   const fetchImpl = async (_input, init) => {
@@ -121,8 +142,52 @@ async function testRunDeviceCommandWritesConfig() {
   });
 }
 
+async function testRunDeviceRevokeCommand() {
+  const calls = [];
+  const fetchImpl = async (input, init) => {
+    calls.push({ input, init });
+    return jsonResponse({ ok: true });
+  };
+
+  await runDeviceCommand(['revoke', preferredDeviceId], {
+    readConfig: () => baseConfig(),
+    writeConfig: () => {
+      throw new Error('revoke should not write config');
+    },
+    fetch: fetchImpl
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(
+    String(calls[0].input),
+    `https://deckagent.example.workers.dev/api/devices/${preferredDeviceId}`
+  );
+  assert.equal(calls[0].init.method, 'DELETE');
+
+  await assert.rejects(
+    () =>
+      runDeviceCommand(['revoke', selfDeviceId], {
+        readConfig: () => baseConfig({ device_id: selfDeviceId }),
+        fetch: fetchImpl
+      }),
+    /Refusing to revoke this device without --yes/
+  );
+  assert.equal(calls.length, 1);
+
+  await runDeviceCommand(['revoke', selfDeviceId, '--yes'], {
+    readConfig: () => baseConfig({ device_id: selfDeviceId }),
+    fetch: fetchImpl
+  });
+  assert.equal(calls.length, 2);
+  assert.equal(
+    String(calls[1].input),
+    `https://deckagent.example.workers.dev/api/devices/${selfDeviceId}`
+  );
+}
+
 await testListWorkerDevices();
 await testPreferWorkerDevice();
 await testClearWorkerPreferredDevice();
+await testRevokeWorkerDevice();
 await testRunDeviceCommandWritesConfig();
+await testRunDeviceRevokeCommand();
 console.log('All device-cmd tests passed.');

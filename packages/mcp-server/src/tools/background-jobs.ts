@@ -1,5 +1,5 @@
 import { createWriteStream } from "node:fs";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -94,9 +94,12 @@ function jsonResponse(value: unknown, isError = false): ToolResponse {
 }
 
 async function writeMeta(meta: JobMeta): Promise<void> {
-  await writeFile(metaPath(meta.id), JSON.stringify(meta, null, 2) + "\n", {
+  const path = metaPath(meta.id);
+  const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  await writeFile(tempPath, JSON.stringify(meta, null, 2) + "\n", {
     mode: 0o600,
   });
+  await rename(tempPath, path);
 }
 
 async function readMeta(jobId: string): Promise<JobMeta | null> {
@@ -432,6 +435,9 @@ export async function start_job(
     });
 
     await writeMeta(meta);
+    if (meta.status !== "running") {
+      await writeMeta(meta);
+    }
 
     return jsonResponse({ job_id: id, status: "running" });
   } catch (err) {
@@ -507,6 +513,7 @@ export async function cancel_job(args: CancelJobArgs): Promise<ToolResponse> {
     if (active) {
       active.meta.status = "cancelled";
       active.meta.updated_at = new Date().toISOString();
+      await writeMeta(active.meta);
     } else {
       refreshed.status = "cancelled";
       refreshed.updated_at = new Date().toISOString();
