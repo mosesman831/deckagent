@@ -96,6 +96,7 @@ The Worker and daemon communicate through a Durable Object that acts as both the
 | **Filesystem** | `read_file`, `write_file`, `edit_file`, `search_files`, `list_directory`, `create_directory`, `move_file`, `get_file_info`, `read_multiple_files` |
 | **Terminal** | `execute_command`, `execute_command_stream`, `list_processes`, `kill_process` |
 | **Browser** | `browser_navigate`, `browser_screenshot`, `browser_click`, `browser_evaluate` |
+| **Snapshots** | `list_snapshots`, `restore_snapshot` |
 | **Environment** | `get_environment` |
 
 ## Security
