@@ -48,6 +48,14 @@ export const ReadMultipleFilesArgsSchema = z.object({
   paths: z.array(z.string()).max(10),
 });
 
+export const TerminalSandboxPlanSchema = z
+  .object({
+    binary: z.string().min(1),
+    trusted_dirs: z.array(z.string()).default([]),
+    network: z.boolean().default(false),
+  })
+  .strict();
+
 export const ExecuteCommandArgsSchema = z.object({
   command: z.string(),
   workdir: z.string().optional(),
@@ -55,6 +63,8 @@ export const ExecuteCommandArgsSchema = z.object({
   env: z.record(z.string()).optional(),
   /** Secret names for the daemon to inject into env before spawn; handlers ignore this field. */
   use_secrets: z.array(z.string()).optional(),
+  /** Hidden daemon-only execution context for terminal_mode=sandbox_fs. */
+  _sandbox: TerminalSandboxPlanSchema.optional(),
 });
 
 export const ExecuteCommandStreamArgsSchema = z.object({
@@ -63,10 +73,14 @@ export const ExecuteCommandStreamArgsSchema = z.object({
   env: z.record(z.string()).optional(),
   /** Secret names for the daemon to inject into env before spawn; handlers ignore this field. */
   use_secrets: z.array(z.string()).optional(),
+  /** Hidden daemon-only execution context for terminal_mode=sandbox_fs. */
+  _sandbox: TerminalSandboxPlanSchema.optional(),
 });
 
 export const ListProcessesArgsSchema = z.object({
   filter: z.string().optional(),
+  /** Hidden daemon-only execution context for terminal_mode=sandbox_fs. */
+  _sandbox: TerminalSandboxPlanSchema.optional(),
 });
 
 export const KillProcessArgsSchema = z.object({
@@ -122,6 +136,7 @@ export type BrowserEvaluateArgs = z.infer<typeof BrowserEvaluateArgsSchema>;
 export type GetEnvironmentArgs = z.infer<typeof GetEnvironmentArgsSchema>;
 export type ListSnapshotsArgs = z.infer<typeof ListSnapshotsArgsSchema>;
 export type RestoreSnapshotArgs = z.infer<typeof RestoreSnapshotArgsSchema>;
+export type TerminalSandboxPlan = z.infer<typeof TerminalSandboxPlanSchema>;
 
 export type ToolContent =
   | { type: "text"; text: string }

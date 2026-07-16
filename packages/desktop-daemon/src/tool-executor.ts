@@ -1,16 +1,21 @@
-import { statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import type { ToolRegistry } from "@deckagent/mcp-server";
 import {
   execute_command_stream,
+  getSnapshotsDir,
   killAllActiveCommands,
   setMaxFileReadSize,
+  type TerminalSandboxPlan,
 } from "@deckagent/mcp-server";
+import { z } from "zod";
 import type { Policy, WorkspacePolicy } from "./policy.js";
 import {
   checkToolAllowed,
+  checkWorkspaceBoundary,
   applyPathDefaults,
+  evaluatePathAccess,
   resolveArgsPaths,
   normalizePolicy,
   getEnabledTools,
@@ -50,6 +55,32 @@ export type ToolExecutionOutcome =
       code: string;
       message: string;
     };
+
+type RestoreTargetCheckOutcome =
+  | {
+      ok: true;
+      requiresConfirmation?: boolean;
+      confirmationReason?: string;
+    }
+  | {
+      ok: false;
+      code: string;
+      message: string;
+    };
+
+const SnapshotMetadataSchema = z
+  .object({
+    id: z.string().uuid(),
+    ts: z.string().min(1),
+    tool: z.string().min(1),
+    path: z.string().min(1),
+    prev_hash: z.string().min(1),
+    blob_path: z.string().min(1),
+    workspace: z.string().optional(),
+  })
+  .strict();
+
+type SnapshotMetadata = z.infer<typeof SnapshotMetadataSchema>;
 
 export interface ToolExecutorOptions {
   toolRegistry: ToolRegistry;
@@ -153,6 +184,64 @@ export class ToolExecutor {
     this.activeExecutions.delete(id);
   }
 
+  private checkRestoreSnapshotTarget(
+    tool: string,
+    args: Record<string, unknown>,
+  ): RestoreTargetCheckOutcome {
+    if (tool !== "restore_snapshot") {
+      return { ok: true };
+    }
+
+    const id = typeof args.id === "string" ? args.id : "";
+    const meta = findSnapshotMetadataById(id);
+    if (!meta) {
+      return {
+        ok: false,
+        code: "NOT_FOUND",
+        message: id
+          ? `Snapshot not found: ${id}`
+          : "Snapshot not found: missing snapshot id",
+      };
+    }
+
+    const pathResult = evaluatePathAccess(meta.path, "write", this.policy);
+    if (!pathResult.allowed) {
+      return {
+        ok: false,
+        code: pathResult.code ?? "PATH_DENIED",
+        message:
+          pathResult.reason ??
+          `Restore snapshot target '${meta.path}' is not writable by policy`,
+      };
+    }
+
+    const workspaceResult = checkWorkspaceBoundary(
+      { path: meta.path },
+      this.workspace,
+    );
+    if (!workspaceResult.allowed) {
+      return {
+        ok: false,
+        code: workspaceResult.code ?? "ACCESS_DENIED",
+        message:
+          workspaceResult.reason ??
+          `Restore snapshot target '${meta.path}' is outside the workspace`,
+      };
+    }
+
+    if (workspaceResult.requiresConfirmation) {
+      return {
+        ok: true,
+        requiresConfirmation: true,
+        confirmationReason:
+          workspaceResult.confirmationReason ??
+          `Restore snapshot target '${meta.path}' is outside the workspace`,
+      };
+    }
+
+    return { ok: true };
+  }
+
   async execute(
     id: string,
     tool: string,
@@ -210,8 +299,19 @@ export class ToolExecutor {
         return outcome;
       }
 
+      const restoreTargetCheck = this.checkRestoreSnapshotTarget(
+        tool,
+        resolvedArgs,
+      );
+      if (!restoreTargetCheck.ok) {
+        outcome = restoreTargetCheck;
+        return outcome;
+      }
+
       const budgetCheck = checkBudget(this.policy, {
-        forConfirmation: !!policyResult.requiresConfirmation,
+        forConfirmation:
+          !!policyResult.requiresConfirmation ||
+          !!restoreTargetCheck.requiresConfirmation,
       });
       if (!budgetCheck.ok) {
         outcome = {
@@ -222,12 +322,21 @@ export class ToolExecutor {
         return outcome;
       }
 
-      if (policyResult.requiresConfirmation) {
+      if (
+        policyResult.requiresConfirmation ||
+        restoreTargetCheck.requiresConfirmation
+      ) {
         recordConfirmation();
+        const confirmationReason = [
+          policyResult.confirmationReason,
+          restoreTargetCheck.confirmationReason,
+        ]
+          .filter((reason): reason is string => !!reason)
+          .join("; ");
         const confirmed = await this.awaitLocalConfirmation(
           tool,
           resolvedArgs,
-          policyResult.confirmationReason || `Tool '${tool}' requires confirmation`,
+          confirmationReason || `Tool '${tool}' requires confirmation`,
         );
         if (!confirmed.ok) {
           outcome = confirmed;
@@ -249,11 +358,16 @@ export class ToolExecutor {
           this.policy.allow_secret_injection,
         );
         execArgs = injected.args;
+        if (policyResult.sandbox) {
+          execArgs = attachSandboxPlan(execArgs, policyResult.sandbox);
+        }
         if (injected.injected.length > 0) {
           this.logger.info(
             `Injected ${injected.injected.length} secret(s) into '${tool}' env`,
           );
         }
+      } else if (tool === "list_processes" && policyResult.sandbox) {
+        execArgs = attachSandboxPlan(execArgs, policyResult.sandbox);
       }
 
       const timeout = this.resolveTimeout(tool, execArgs);
@@ -279,6 +393,7 @@ export class ToolExecutor {
                 command: string;
                 workdir?: string;
                 env?: Record<string, string>;
+                _sandbox?: TerminalSandboxPlan;
               },
               options.onProgress,
             );
@@ -483,6 +598,56 @@ function stripRemoteBypass(
   delete next.preconfirmed;
   delete next.__preconfirmed;
   return next;
+}
+
+function attachSandboxPlan(
+  args: Record<string, unknown>,
+  sandbox: TerminalSandboxPlan,
+): Record<string, unknown> {
+  return { ...args, _sandbox: sandbox };
+}
+
+function findSnapshotMetadataById(id: string): SnapshotMetadata | null {
+  const idResult = z.string().uuid().safeParse(id);
+  if (!idResult.success) return null;
+
+  const snapshotsDir = getSnapshotsDir();
+  let dayDirs: string[];
+  try {
+    dayDirs = readdirSync(snapshotsDir);
+  } catch {
+    return null;
+  }
+
+  for (const day of dayDirs) {
+    const dayDir = join(snapshotsDir, day);
+    let stat;
+    try {
+      stat = statSync(dayDir);
+    } catch {
+      continue;
+    }
+    if (!stat.isDirectory()) continue;
+
+    const metaPath = join(dayDir, `${idResult.data}.json`);
+    let raw: string;
+    try {
+      raw = readFileSync(metaPath, "utf-8");
+    } catch {
+      continue;
+    }
+
+    try {
+      const parsed = SnapshotMetadataSchema.parse(JSON.parse(raw));
+      if (parsed.id === idResult.data) {
+        return parsed;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
 }
 
 function checkFileReadSize(

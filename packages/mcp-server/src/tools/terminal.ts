@@ -11,6 +11,7 @@ import {
   type ToolResponse,
 } from "../schemas.js";
 import { resolveToolPath } from "../workspace-context.js";
+import { buildSandboxCommand } from "./terminal-sandbox.js";
 
 const activeChildren = new Set<ChildProcess>();
 const SIGKILL_DELAY_MS = 500;
@@ -63,14 +64,18 @@ function runShellCommand(
     env?: Record<string, string>;
     timeoutMs?: number;
     onChunk?: (chunk: string) => void;
+    sandbox?: ExecuteCommandArgs["_sandbox"];
   },
 ): Promise<{ stdout: string; stderr: string; code: number | null; timedOut: boolean }> {
   return new Promise((resolve) => {
-    const child = spawn(command, {
-      shell: true,
-      cwd: options.workdir,
-      env: { ...process.env, ...options.env },
-    });
+    const env = { ...process.env, ...options.env };
+    const child = options.sandbox
+      ? spawnSandboxedCommand(command, options.workdir, options.sandbox, env)
+      : spawn(command, {
+          shell: true,
+          cwd: options.workdir,
+          env,
+        });
 
     trackChild(child);
 
@@ -118,6 +123,26 @@ function runShellCommand(
   });
 }
 
+function spawnSandboxedCommand(
+  command: string,
+  workdir: string,
+  sandbox: NonNullable<ExecuteCommandArgs["_sandbox"]>,
+  env: NodeJS.ProcessEnv,
+): ChildProcess {
+  const sandboxCommand = buildSandboxCommand({
+    binary: sandbox.binary,
+    trusted_dirs: sandbox.trusted_dirs,
+    network: sandbox.network,
+    command,
+    cwd: workdir,
+  });
+  return spawn(sandboxCommand.argv[0]!, sandboxCommand.argv.slice(1), {
+    shell: false,
+    cwd: workdir,
+    env: { ...env, ...sandboxCommand.env },
+  });
+}
+
 export async function execute_command(args: ExecuteCommandArgs): Promise<ToolResponse> {
   const parsed = ExecuteCommandArgsSchema.parse(args);
   const workdir = parsed.workdir ? resolveToolPath(parsed.workdir) : process.cwd();
@@ -128,6 +153,7 @@ export async function execute_command(args: ExecuteCommandArgs): Promise<ToolRes
       workdir,
       env: parsed.env,
       timeoutMs,
+      sandbox: parsed._sandbox,
     });
 
     if (result.timedOut) {
@@ -175,6 +201,7 @@ export async function execute_command_stream(
       workdir,
       env: parsed.env,
       onChunk,
+      sandbox: parsed._sandbox,
     });
 
     const parts: string[] = [];
@@ -199,8 +226,14 @@ export async function execute_command_stream(
   }
 }
 
-async function listProcessesUnix(filter?: string): Promise<string> {
-  const result = await runShellCommand("ps aux", { workdir: process.cwd() });
+async function listProcessesUnix(
+  filter?: string,
+  sandbox?: ExecuteCommandArgs["_sandbox"],
+): Promise<string> {
+  const result = await runShellCommand("ps aux", {
+    workdir: process.cwd(),
+    sandbox,
+  });
   if (result.code !== 0 && !result.stdout) {
     throw new Error(result.stderr || "ps aux failed");
   }
@@ -217,7 +250,10 @@ async function listProcessesUnix(filter?: string): Promise<string> {
     .join("\n");
 }
 
-async function listProcessesWindows(filter?: string): Promise<string> {
+async function listProcessesWindows(
+  filter?: string,
+  sandbox?: ExecuteCommandArgs["_sandbox"],
+): Promise<string> {
   // Prefer tasklist CSV for reliable parsing; fall back to PowerShell / wmic.
   const attempts = [
     'tasklist /FO CSV /NH',
@@ -227,7 +263,10 @@ async function listProcessesWindows(filter?: string): Promise<string> {
 
   let lastError = "unknown error";
   for (const command of attempts) {
-    const result = await runShellCommand(command, { workdir: process.cwd() });
+    const result = await runShellCommand(command, {
+      workdir: process.cwd(),
+      sandbox,
+    });
     if (result.stdout.trim()) {
       const lines = result.stdout
         .split(/\r?\n/)
@@ -252,8 +291,8 @@ export async function list_processes(args: ListProcessesArgs = {}): Promise<Tool
   try {
     const text =
       process.platform === "win32"
-        ? await listProcessesWindows(filter)
-        : await listProcessesUnix(filter);
+        ? await listProcessesWindows(filter, parsed._sandbox)
+        : await listProcessesUnix(filter, parsed._sandbox);
 
     return {
       content: [{ type: "text", text: text || "No matching processes" }],

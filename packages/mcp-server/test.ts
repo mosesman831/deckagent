@@ -293,6 +293,65 @@ async function main() {
     console.log("✓ execute_command");
   }
 
+  // execute_command sandbox wrapping (fake bwrap records argv, then execs command after --)
+  if (process.platform !== "win32") {
+    const fakeBinDir = path.join(TEST_ROOT, "fake-bin");
+    const fakeBwrap = path.join(fakeBinDir, "bwrap");
+    const fakeLog = path.join(TEST_ROOT, "fake-bwrap-argv.txt");
+    await fs.mkdir(fakeBinDir, { recursive: true });
+    await fs.writeFile(
+      fakeBwrap,
+      [
+        "#!/bin/sh",
+        "printf '%s\\n' \"$@\" > \"$FAKE_BWRAP_LOG\"",
+        "while [ \"$1\" != \"--\" ]; do",
+        "  shift",
+        "done",
+        "shift",
+        "exec \"$@\"",
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+    await fs.chmod(fakeBwrap, 0o755);
+
+    process.env.FAKE_BWRAP_LOG = fakeLog;
+    try {
+      const wrapped = await registry.execute("execute_command", {
+        command: "echo sandbox-wrapped",
+        workdir: TEST_ROOT,
+        _sandbox: {
+          binary: fakeBwrap,
+          trusted_dirs: [TEST_ROOT],
+          network: false,
+        },
+      });
+      assert(!wrapped.isError, `sandboxed execute_command failed: ${textOf(wrapped)}`);
+      assert(textOf(wrapped).includes("sandbox-wrapped"), "sandboxed command output mismatch");
+      const argvLog = await fs.readFile(fakeLog, "utf-8");
+      assert(argvLog.includes("--unshare-net"), "sandbox wrapper disables network");
+      assert(argvLog.includes("--bind\n" + TEST_ROOT + "\n" + TEST_ROOT), "sandbox binds trusted dir rw");
+      assert(argvLog.includes("/bin/sh\n-c\necho sandbox-wrapped"), "sandbox wraps shell command after --");
+    } finally {
+      delete process.env.FAKE_BWRAP_LOG;
+    }
+
+    const missingSandbox = await registry.execute("execute_command", {
+      command: "echo should-not-run",
+      _sandbox: {
+        binary: path.join(fakeBinDir, "missing-bwrap"),
+        trusted_dirs: [TEST_ROOT],
+        network: false,
+      },
+    });
+    assert(missingSandbox.isError, "missing sandbox binary fails closed");
+    assert(
+      textOf(missingSandbox).includes("Sandbox binary is unavailable"),
+      "missing sandbox binary has clear error",
+    );
+    console.log("✓ execute_command sandbox wrapping");
+  }
+
   // execute_command_stream (via registry + direct onChunk)
   {
     const chunks: string[] = [];

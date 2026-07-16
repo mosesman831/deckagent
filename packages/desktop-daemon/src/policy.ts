@@ -5,7 +5,9 @@ import { dirname, join, resolve as resolvePath, isAbsolute, normalize, sep } fro
 import { normalizePolicy as applyNormalizePolicy, describeNormalizationFixes } from "./security-profiles.js";
 import {
   evaluatePathAccess,
+  expandAndResolve,
   findSandboxBinary,
+  getTrustedDirectories,
   type PathOp,
 } from "./path-security.js";
 import {
@@ -28,11 +30,11 @@ import {
  */
 export const PolicySchema = z.object({
   version: z.number().int().default(2),
-  /** Security profile — defaults applied via normalizePolicy. Setup will use strict later. */
-  profile: z.enum(["strict", "dev", "locked"]).default("dev"),
+  /** Security profile — defaults applied via normalizePolicy. */
+  profile: z.enum(["strict", "dev", "locked"]).default("strict"),
   /** When true, Control UI / remote policy edits must be rejected (Agent C lock UI). */
   profile_locked: z.boolean().default(false),
-  allowed_directories: z.array(z.string()).default(["~"]),
+  allowed_directories: z.array(z.string()).default([]),
   /**
    * Trusted roots (S3). If empty, evaluator falls back to allowed_directories.
    */
@@ -138,6 +140,14 @@ export interface PolicyResult {
   code?: string;
   requiresConfirmation?: boolean;
   confirmationReason?: string;
+  /** Hidden execution context for terminal_mode=sandbox_fs. */
+  sandbox?: SandboxExecutionContext;
+}
+
+export interface SandboxExecutionContext {
+  binary: string;
+  trusted_dirs: string[];
+  network: boolean;
 }
 
 /** Active workspace from config (Wave 3 F1). */
@@ -188,7 +198,23 @@ export function getPolicyPath(): string {
 }
 
 export function createDefaultPolicy(): Policy {
-  return normalizePolicy({});
+  return normalizePolicy({
+    profile: "strict",
+    allowed_directories: [],
+    trusted_directories: [],
+    trusted_read_directories: [],
+    trusted_write_directories: [],
+    allow_plugins: false,
+    allow_secret_injection: false,
+    terminal_mode: "allowlist",
+    command_mode: "allowlist",
+    network: {
+      allow_browser_hosts: [],
+      deny_browser_hosts: [],
+      block_shell_net_tools: true,
+    },
+    protected_path_policy: "deny_all",
+  });
 }
 
 /**
@@ -207,6 +233,9 @@ export function readPolicy(path = getPolicyPath()): Policy {
   if (!existsSync(path)) {
     const defaultPolicy = createDefaultPolicy();
     writePolicy(defaultPolicy, path);
+    process.stderr.write(
+      `[deckagent] WARN Created strict default policy at ${path}; run deckagent policy trust <dir>\n`,
+    );
     return defaultPolicy;
   }
 
@@ -553,13 +582,24 @@ export function checkToolAllowed(
     workspace?.root ?? null,
   );
 
+  const terminalSandbox =
+    TERMINAL_TOOLS.has(toolName) && effective.terminal_mode === "sandbox_fs"
+      ? getSandboxExecutionContext(effective)
+      : null;
+  if (terminalSandbox && !terminalSandbox.allowed) {
+    return terminalSandbox;
+  }
+
   const command =
     typeof resolvedArgs.command === "string" ? resolvedArgs.command : "";
+  let sandbox: SandboxExecutionContext | undefined =
+    terminalSandbox?.allowed ? terminalSandbox.sandbox : undefined;
   if (command && TERMINAL_TOOLS.has(toolName)) {
     const commandCheck = checkCommandPolicy(command, effective);
     if (!commandCheck.allowed) {
       return commandCheck;
     }
+    sandbox = commandCheck.sandbox ?? sandbox;
   }
 
   // S7 browser URL host checks
@@ -609,6 +649,7 @@ export function checkToolAllowed(
       requiresConfirmation: true,
       confirmationReason:
         workspaceResult.confirmationReason || "Path outside workspace",
+      ...(sandbox ? { sandbox } : {}),
     };
   }
 
@@ -620,10 +661,11 @@ export function checkToolAllowed(
       allowed: true,
       requiresConfirmation: true,
       confirmationReason: reason,
+      ...(sandbox ? { sandbox } : {}),
     };
   }
 
-  return { allowed: true };
+  return { allowed: true, ...(sandbox ? { sandbox } : {}) };
 }
 
 /**
@@ -684,6 +726,7 @@ export function checkCommandPolicy(
 ): PolicyResult {
   const effective = normalizePolicy(policy);
   const mode = effective.terminal_mode ?? "blocklist";
+  let sandbox: SandboxExecutionContext | undefined;
 
   if (mode === "off" || !effective.allow_terminal) {
     return {
@@ -694,14 +737,9 @@ export function checkCommandPolicy(
   }
 
   if (mode === "sandbox_fs") {
-    if (!findSandboxBinary()) {
-      return {
-        allowed: false,
-        code: "TERMINAL_SANDBOX_UNAVAILABLE",
-        reason:
-          "[TERMINAL_SANDBOX_UNAVAILABLE] terminal_mode=sandbox_fs requires bwrap or sandbox-exec (fail closed)",
-      };
-    }
+    const sandboxResult = getSandboxExecutionContext(effective);
+    if (!sandboxResult.allowed) return sandboxResult;
+    sandbox = sandboxResult.sandbox;
     // MVP: once sandbox binary exists, still apply allowlist-style command filter
   }
 
@@ -742,6 +780,19 @@ export function checkCommandPolicy(
   }
 
   if (useAllowlist) {
+    if (mode !== "sandbox_fs") {
+      const inlineEval = findInlineInterpreterEval(command);
+      if (inlineEval) {
+        return {
+          allowed: false,
+          code: "COMMAND_BLOCKED",
+          reason:
+            `[COMMAND_BLOCKED] Inline interpreter execution '${inlineEval}' is blocked ` +
+            "under allowlist/strict because it can run arbitrary code; use terminal_mode=sandbox_fs for sandboxed interpreter snippets.",
+        };
+      }
+    }
+
     if (effective.allowed_commands.length === 0) {
       return {
         allowed: false,
@@ -768,7 +819,7 @@ export function checkCommandPolicy(
           "Command blocked by policy: command_mode is allowlist and command does not match any allowed_commands entry",
       };
     }
-    return { allowed: true };
+    return { allowed: true, ...(sandbox ? { sandbox } : {}) };
   }
 
   // blocklist (default)
@@ -780,7 +831,38 @@ export function checkCommandPolicy(
       reason: `Command blocked by policy: matched '${blockResult.matched ?? "dangerous pattern"}'`,
     };
   }
-  return { allowed: true };
+  return { allowed: true, ...(sandbox ? { sandbox } : {}) };
+}
+
+function getSandboxExecutionContext(policy: Policy): PolicyResult {
+  const binary = findSandboxBinary();
+  if (!binary) {
+    return {
+      allowed: false,
+      code: "TERMINAL_SANDBOX_UNAVAILABLE",
+      reason:
+        "[TERMINAL_SANDBOX_UNAVAILABLE] terminal_mode=sandbox_fs requires bwrap or sandbox-exec (fail closed)",
+    };
+  }
+
+  return {
+    allowed: true,
+    sandbox: {
+      binary,
+      trusted_dirs: getTrustedDirectories(policy, "write").map((dir) =>
+        expandAndResolve(dir),
+      ),
+      network: false,
+    },
+  };
+}
+
+function findInlineInterpreterEval(command: string): string | null {
+  const match = command.match(
+    /(?:^|[;&|]\s*)(?:env\s+[^;&|]*\s+)?(?:\S*\/)?(python(?:3(?:\.\d+)?)?|node|perl|ruby)\s+(-[^\s]*[ce][^\s]*|--eval\b|--execute\b)/i,
+  );
+  if (!match) return null;
+  return `${match[1]} ${match[2]}`;
 }
 
 /**

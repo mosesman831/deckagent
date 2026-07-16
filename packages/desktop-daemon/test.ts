@@ -23,6 +23,7 @@ import {
   applyPathDefaults,
   resolveArgsPaths,
   createDefaultPolicy,
+  readPolicy,
   normalizePolicy,
   getCapabilities,
   evaluatePathAccess,
@@ -77,7 +78,7 @@ import {
   writeDaemonHealth,
   type DaemonHealth,
 } from "./src/health.js";
-import { createRegistry, type ToolRegistry } from "@deckagent/mcp-server";
+import { createRegistry, setSnapshotsDir, type ToolRegistry } from "@deckagent/mcp-server";
 import { resolve as resolvePath } from "node:path";
 import { loadPlugins } from "./src/plugins.js";
 
@@ -136,16 +137,20 @@ function testCommandAllowlist(): void {
   section("command_mode allowlist");
 
   const defaultPolicy = createDefaultPolicy();
-  assertEqual(defaultPolicy.command_mode, "blocklist", "default command_mode is blocklist");
+  assertEqual(defaultPolicy.profile, "strict", "default profile is strict");
+  assertEqual(defaultPolicy.command_mode, "allowlist", "default command_mode is allowlist");
+  assertEqual(defaultPolicy.terminal_mode, "allowlist", "default terminal_mode is allowlist");
   assert(
     Array.isArray(defaultPolicy.allowed_commands) &&
-      defaultPolicy.allowed_commands.length === 0,
-    "default allowed_commands is empty",
+      defaultPolicy.allowed_commands.includes("git"),
+    "default allowed_commands includes strict allowlist",
   );
 
   const allowlistEmpty: Policy = {
     ...createDefaultPolicy(),
+    profile: "dev",
     command_mode: "allowlist",
+    terminal_mode: "allowlist",
     allowed_commands: [],
     require_confirmation: [],
   };
@@ -162,7 +167,9 @@ function testCommandAllowlist(): void {
 
   const allowlist: Policy = {
     ...createDefaultPolicy(),
+    profile: "dev",
     command_mode: "allowlist",
+    terminal_mode: "allowlist",
     allowed_commands: ["git", "echo hello"],
     require_confirmation: [],
   };
@@ -199,9 +206,39 @@ function testCommandAllowlist(): void {
   const blocklist = checkToolAllowed(
     "execute_command",
     { command: "sudo ls" },
-    { ...createDefaultPolicy(), require_confirmation: [] },
+    {
+      ...createDefaultPolicy(),
+      profile: "dev",
+      command_mode: "blocklist",
+      terminal_mode: "blocklist",
+      require_confirmation: [],
+    },
   );
   assert(!blocklist.allowed, "blocklist mode still blocks sudo");
+}
+
+function testStrictDefaultPolicyCreation(): void {
+  section("strict default policy creation");
+
+  const dir = mkdtempSync(join(tmpdir(), "deckagent-policy-"));
+  try {
+    const policyPath = join(dir, "policy.json");
+    const policy = readPolicy(policyPath);
+    assertEqual(policy.profile, "strict", "missing policy creates strict profile");
+    assertEqual(policy.allowed_directories.length, 0, "strict default has no allowed directories");
+    assertEqual(policy.trusted_directories.length, 0, "strict default has no trusted directories");
+    assertEqual(policy.allow_plugins, false, "strict default disables plugins");
+    assertEqual(policy.allow_secret_injection, false, "strict default disables secret injection");
+    assertEqual(policy.terminal_mode, "allowlist", "strict default terminal allowlist");
+    assertEqual(policy.command_mode, "allowlist", "strict default command allowlist");
+    assertEqual(policy.network.block_shell_net_tools, true, "strict default blocks shell net tools");
+    assertEqual(policy.protected_path_policy, "deny_all", "strict default protected deny_all");
+    assert(existsSync(policyPath), "strict default policy written to disk");
+    const raw = JSON.parse(readFileSync(policyPath, "utf-8")) as Policy;
+    assertEqual(raw.profile, "strict", "written policy profile strict");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 function testReadOnly(): void {
@@ -209,6 +246,8 @@ function testReadOnly(): void {
 
   const policy: Policy = {
     ...createDefaultPolicy(),
+    allowed_directories: ["~"],
+    trusted_directories: ["~"],
     read_only: true,
     require_confirmation: [],
   };
@@ -273,6 +312,10 @@ function testNoPreconfirmedBypass(): void {
 
   const policy: Policy = {
     ...createDefaultPolicy(),
+    profile: "dev",
+    command_mode: "blocklist",
+    terminal_mode: "blocklist",
+    allowed_commands: [],
     require_confirmation: ["execute_command"],
     read_only: false,
   };
@@ -835,7 +878,8 @@ function testRestoreSnapshotPolicy(): void {
     defaults.require_confirmation.includes("restore_snapshot"),
     "restore_snapshot in default require_confirmation",
   );
-  assertEqual(defaults.allow_secret_injection, true, "allow_secret_injection default true");
+  assertEqual(defaults.allow_secret_injection, false, "allow_secret_injection default false");
+  assertEqual(defaults.allow_plugins, false, "allow_plugins default false");
   assert(
     typeof defaults.budgets.max_tool_calls_per_hour === "number",
     "budgets defaults present",
@@ -873,16 +917,212 @@ function testRestoreSnapshotPolicy(): void {
   const listOk = checkToolAllowed(
     "list_snapshots",
     { path: join(homedir(), "notes.txt") },
-    { ...createDefaultPolicy(), require_confirmation: [] },
+    {
+      ...createDefaultPolicy(),
+      allowed_directories: ["~"],
+      trusted_directories: ["~"],
+      require_confirmation: [],
+    },
   );
   assert(listOk.allowed, "list_snapshots allowed for path under ~");
 
   const listBlocked = checkToolAllowed(
     "list_snapshots",
     { path: "/etc/passwd" },
-    { ...createDefaultPolicy(), require_confirmation: [] },
+    {
+      ...createDefaultPolicy(),
+      allowed_directories: ["~"],
+      trusted_directories: ["~"],
+      require_confirmation: [],
+    },
   );
   assert(!listBlocked.allowed, "list_snapshots blocked outside allowed dirs");
+}
+
+async function testRestoreSnapshotTargetRecheck(): Promise<void> {
+  section("restore_snapshot target re-check (PR0.2)");
+
+  const dir = mkdtempSync(join(tmpdir(), "deckagent-restore-policy-"));
+  const snapshotsDir = join(dir, "snapshots");
+  const dayDir = join(snapshotsDir, "2026-07-16");
+  const trustedDir = join(dir, "trusted");
+  mkdirSync(dayDir, { recursive: true });
+  mkdirSync(trustedDir, { recursive: true });
+  setSnapshotsDir(snapshotsDir);
+
+  const protectedId = "11111111-1111-4111-8111-111111111111";
+  const trustedId = "22222222-2222-4222-8222-222222222222";
+  const trustedTarget = join(trustedDir, "restore.txt");
+
+  function writeMeta(id: string, targetPath: string): void {
+    writeFileSync(
+      join(dayDir, `${id}.json`),
+      JSON.stringify(
+        {
+          id,
+          ts: "2026-07-16T00:00:00.000Z",
+          tool: "edit_file",
+          path: targetPath,
+          prev_hash: "sha256",
+          blob_path: join(dayDir, `${id}.bin`),
+        },
+        null,
+        2,
+      ),
+    );
+  }
+
+  writeMeta(protectedId, join(homedir(), ".ssh", "id_rsa"));
+  writeMeta(trustedId, trustedTarget);
+
+  const logger = new Logger("error", false);
+  const confirmation = new ConfirmationServer(logger, { port: 19155 });
+  let executed = 0;
+  const registry = {
+    execute: async () => {
+      executed += 1;
+      return { content: [{ type: "text", text: "restored" }] };
+    },
+    register() {
+      return this;
+    },
+    get() {
+      return undefined;
+    },
+    list() {
+      return [];
+    },
+  } as unknown as ToolRegistry;
+
+  try {
+    const protectedExecutor = new ToolExecutor({
+      toolRegistry: registry,
+      policy: {
+        ...createDefaultPolicy(),
+        allowed_directories: ["~"],
+        trusted_directories: ["~"],
+        require_confirmation: [],
+      },
+      logger,
+      confirmationServer: confirmation,
+      toolTimeoutSeconds: 5,
+    });
+    const denied = await protectedExecutor.execute(
+      "restore-protected",
+      "restore_snapshot",
+      { id: protectedId },
+      { source: "local" },
+    );
+    assert(!denied.ok, "restore protected snapshot target denied");
+    if (!denied.ok) {
+      assertEqual(denied.code, "PATH_PROTECTED", "protected restore target → PATH_PROTECTED");
+    }
+    assertEqual(executed, 0, "protected restore denied before registry execute");
+
+    const trustedExecutor = new ToolExecutor({
+      toolRegistry: registry,
+      policy: {
+        ...createDefaultPolicy(),
+        allowed_directories: [trustedDir],
+        trusted_directories: [trustedDir],
+        require_confirmation: [],
+      },
+      logger,
+      confirmationServer: confirmation,
+      toolTimeoutSeconds: 5,
+    });
+    const allowed = await trustedExecutor.execute(
+      "restore-trusted",
+      "restore_snapshot",
+      { id: trustedId },
+      { source: "local" },
+    );
+    assert(allowed.ok, "restore trusted snapshot target allowed");
+    assertEqual(executed, 1, "trusted restore reaches registry execute");
+  } finally {
+    logger.shutdown();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function testSandboxPlanAttachedByExecutor(): Promise<void> {
+  section("sandbox_fs execution context (PR0.1)");
+
+  const dir = mkdtempSync(join(tmpdir(), "deckagent-sandbox-plan-"));
+  const fakeBinDir = join(dir, "bin");
+  const trustedDir = join(dir, "trusted");
+  mkdirSync(fakeBinDir, { recursive: true });
+  mkdirSync(trustedDir, { recursive: true });
+  const fakeBwrap = join(fakeBinDir, "bwrap");
+  writeFileSync(fakeBwrap, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+
+  const originalPath = process.env.PATH;
+  const logger = new Logger("error", false);
+  const confirmation = new ConfirmationServer(logger, { port: 19156 });
+  let capturedArgs: Record<string, unknown> | null = null;
+  const registry = {
+    execute: async (_tool: string, args: unknown) => {
+      capturedArgs =
+        args && typeof args === "object" && !Array.isArray(args)
+          ? (args as Record<string, unknown>)
+          : null;
+      return { content: [{ type: "text", text: "ok" }] };
+    },
+    register() {
+      return this;
+    },
+    get() {
+      return undefined;
+    },
+    list() {
+      return [];
+    },
+  } as unknown as ToolRegistry;
+
+  try {
+    process.env.PATH = fakeBinDir;
+    const executor = new ToolExecutor({
+      toolRegistry: registry,
+      policy: {
+        ...createDefaultPolicy(),
+        terminal_mode: "sandbox_fs",
+        command_mode: "allowlist",
+        allowed_commands: ["echo"],
+        allowed_directories: [trustedDir],
+        trusted_directories: [trustedDir],
+        require_confirmation: [],
+      },
+      logger,
+      confirmationServer: confirmation,
+      toolTimeoutSeconds: 5,
+    });
+    const result = await executor.execute(
+      "sandbox-plan",
+      "execute_command",
+      { command: "echo hi", workdir: trustedDir },
+      { source: "local" },
+    );
+    assert(result.ok, "sandbox_fs command allowed with fake bwrap");
+    assert(capturedArgs !== null, "registry received terminal args");
+    const captured = capturedArgs as Record<string, unknown> | null;
+    const sandbox = captured?._sandbox as Record<string, unknown> | undefined;
+    assert(sandbox !== undefined, "executor attaches hidden _sandbox plan");
+    assertEqual(sandbox?.binary, fakeBwrap, "sandbox plan uses fake bwrap");
+    assertEqual(sandbox?.network, false, "sandbox plan disables network");
+    const trustedDirs = sandbox?.trusted_dirs;
+    assert(
+      Array.isArray(trustedDirs) && trustedDirs.includes(trustedDir),
+      "sandbox plan includes trusted directory",
+    );
+  } finally {
+    if (originalPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = originalPath;
+    }
+    logger.shutdown();
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 function testSecretsVault(): void {
@@ -1375,6 +1615,26 @@ function testSecurityMatrixWave4(): void {
   );
   assert(gitOk.allowed, "strict allowlist allows git status");
 
+  const pythonInlineBlocked = checkToolAllowed(
+    "execute_command",
+    { command: "python -c 'print(1)'" },
+    { ...strict, require_confirmation: [] },
+  );
+  assert(!pythonInlineBlocked.allowed, "strict allowlist blocks python -c");
+  assertEqual(pythonInlineBlocked.code, "COMMAND_BLOCKED", "python -c → COMMAND_BLOCKED");
+  assert(
+    (pythonInlineBlocked.reason || "").includes("sandbox_fs"),
+    "interpreter block message points to sandbox_fs",
+  );
+
+  const nodeInlineBlocked = checkToolAllowed(
+    "execute_command",
+    { command: "node -e \"console.log(1)\"" },
+    { ...strict, require_confirmation: [] },
+  );
+  assert(!nodeInlineBlocked.allowed, "strict allowlist blocks node -e");
+  assertEqual(nodeInlineBlocked.code, "COMMAND_BLOCKED", "node -e → COMMAND_BLOCKED");
+
   // --- getEnabledTools omits writers when read_only ---
   const roTools = getEnabledTools(
     normalizePolicy({ read_only: true, read_only_mode: "fs_read" }),
@@ -1463,26 +1723,33 @@ function testSecurityMatrixWave4(): void {
   }
 
   // --- sandbox_fs without binary fails closed ---
-  const sandboxPolicy = normalizePolicy({
-    terminal_mode: "sandbox_fs",
-    allow_terminal: true,
-    allowed_commands: ["echo"],
-    command_mode: "allowlist",
-    require_confirmation: [],
-  });
-  const sandboxResult = checkToolAllowed(
-    "execute_command",
-    { command: "echo hi" },
-    sandboxPolicy,
-  );
-  if (!sandboxResult.allowed) {
+  const originalPath = process.env.PATH;
+  try {
+    process.env.PATH = "";
+    const sandboxPolicy = normalizePolicy({
+      terminal_mode: "sandbox_fs",
+      allow_terminal: true,
+      allowed_commands: ["echo"],
+      command_mode: "allowlist",
+      require_confirmation: [],
+    });
+    const sandboxResult = checkToolAllowed(
+      "execute_command",
+      { command: "echo hi" },
+      sandboxPolicy,
+    );
+    assert(!sandboxResult.allowed, "sandbox_fs without binary is denied");
     assertEqual(
       sandboxResult.code,
       "TERMINAL_SANDBOX_UNAVAILABLE",
       "sandbox_fs without binary → TERMINAL_SANDBOX_UNAVAILABLE",
     );
-  } else {
-    assert(true, "sandbox binary present — sandbox_fs allowed echo");
+  } finally {
+    if (originalPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = originalPath;
+    }
   }
 }
 
@@ -1643,6 +1910,7 @@ async function main(): Promise<void> {
   console.log("desktop-daemon smoke tests");
   testBlockedCommands();
   testCommandAllowlist();
+  testStrictDefaultPolicyCreation();
   testReadOnly();
   testPathAllow();
   testNoPreconfirmedBypass();
@@ -1656,6 +1924,8 @@ async function main(): Promise<void> {
   testWorkspacePathEnforcement();
   testLocalResources();
   testRestoreSnapshotPolicy();
+  await testRestoreSnapshotTargetRecheck();
+  await testSandboxPlanAttachedByExecutor();
   testSecretsVault();
   testBudgets();
   await testControlUi();

@@ -58,11 +58,14 @@ export const DEFAULT_STRICT_ALLOWED_COMMANDS = [
   'git',
   'npm',
   'node',
+  'npx',
   'python',
   'pytest',
   'cargo',
   'go',
-  'make'
+  'make',
+  'tsc',
+  'eslint'
 ] as const;
 
 export const DEFAULT_PROTECTED_PATHS = [

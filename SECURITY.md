@@ -19,5 +19,6 @@ Please open a private security advisory on GitHub, or email the maintainers list
 5. Rotate `API_TOKEN` (Worker secret) and device tokens if they leak.
 6. Browser tools require `allow_browser: true` (or `deckagent-daemon --enable-browser`) and a local Playwright Chromium install.
 7. The v2 extension talks only to `127.0.0.1:9147` — do not expose that port.
+8. Terminal allowlists are command-name filters, not sandboxes. Interpreters such as `python`, `node`, `perl`, and `ruby` can run arbitrary code with inline flags (`-c`, `-e`, `--eval`); DeckAgent blocks those inline forms under strict/allowlist unless `terminal_mode` is `sandbox_fs`.
 
 For the next hardening wave (profiles, protected paths, tools/list filtering, symlink policy), see [`docs/SECURITY_ENFORCEMENT_SPEC.md`](docs/SECURITY_ENFORCEMENT_SPEC.md).

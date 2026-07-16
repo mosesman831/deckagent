@@ -277,6 +277,7 @@ export {
   kill_process,
   killAllActiveCommands,
 };
+export { buildSandboxCommand } from "./tools/terminal-sandbox.js";
 export {
   browser_navigate,
   browser_screenshot,
@@ -301,3 +302,7 @@ export {
   resolveToolPath,
   type WorkspaceContext,
 } from "./workspace-context.js";
+export {
+  TerminalSandboxPlanSchema,
+  type TerminalSandboxPlan,
+} from "./schemas.js";
