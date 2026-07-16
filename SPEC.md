@@ -85,6 +85,7 @@ See [`SECURITY.md`](SECURITY.md) and [`docs/SECURITY_ENFORCEMENT_SPEC.md`](docs/
 | [`docs/SECURITY_ENFORCEMENT_SPEC.md`](docs/SECURITY_ENFORCEMENT_SPEC.md) | Implemented Wave 4 hard security enforcement |
 | [`docs/PRODUCTION_READINESS_SPEC.md`](docs/PRODUCTION_READINESS_SPEC.md) | Production-readiness P0–P2 hardening (implemented) |
 | [`docs/WAVE5_OPERATOR_SPEC.md`](docs/WAVE5_OPERATOR_SPEC.md) | Wave 5 onboard/smoke, diffs, jobs, revoke, integrity, e2e |
+| [`docs/WAVE6_POLISH_SPEC.md`](docs/WAVE6_POLISH_SPEC.md) | Wave 6 UI/CLI/Worker/catalog quality polish |
 | [`README.md`](README.md) | Operator-facing install, feature status, and usage guide |
 | [`SECURITY.md`](SECURITY.md) | Vulnerability reporting, hardening checklist, and residual risks |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release notes and shipped-change summary |

@@ -1,6 +1,6 @@
 # DeckAgent — Wave 6 Quality & Polish Spec
 
-> Status: **SPEC → IMPLEMENT**  
+> Status: **IMPLEMENTED** — Control UI, confirmations, Worker health/errors, catalogs, CLI UX, daemon health, README polished.  
 > Goal: Improve every user-facing and agent-facing surface without inventing mega-features. Make the product clearer, safer-feeling, and easier to operate.  
 > Assumes Waves 2–5 + production P0–P2 are complete.
 
