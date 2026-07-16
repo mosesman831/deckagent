@@ -87,6 +87,33 @@ export interface StateUpdateMessage {
   capabilities?: string[];
 }
 
+/** Worker → daemon: fetch an MCP resource from local state. */
+export interface ReadResourceMessage {
+  type: "read_resource";
+  id: string;
+  uri: string;
+  args?: Record<string, unknown>;
+}
+
+/** Daemon → Worker: successful resource read. */
+export interface ResourceResultMessage {
+  type: "resource_result";
+  id: string;
+  contents: Array<{
+    uri: string;
+    mimeType?: string;
+    text?: string;
+    blob?: string;
+  }>;
+}
+
+/** Daemon → Worker: resource read failure. */
+export interface ResourceErrorMessage {
+  type: "resource_error";
+  id: string;
+  error: { code: string; message: string };
+}
+
 export type TunnelMessage =
   | AuthMessage
   | AuthOkMessage
@@ -95,6 +122,9 @@ export type TunnelMessage =
   | ToolResultMessage
   | ToolErrorMessage
   | ToolProgressMessage
+  | ReadResourceMessage
+  | ResourceResultMessage
+  | ResourceErrorMessage
   | HeartbeatMessage
   | HeartbeatAckMessage
   | StateUpdateMessage;

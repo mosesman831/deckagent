@@ -4,6 +4,8 @@ import type {
   ExecuteToolMessage,
   ToolResultMessage,
   AuthOkMessage,
+  ReadResourceMessage,
+  ResourceResultMessage,
 } from "./types.js";
 import { JsonRpcCode } from "./types.js";
 import { TOOL_CATALOG, TOOL_NAMES } from "./tool-catalog.js";
@@ -13,6 +15,13 @@ import {
   getPromptMessages,
   isKnownPrompt,
 } from "./prompt-catalog.js";
+import {
+  RESOURCE_CATALOG,
+  isDaemonResourceUri,
+  isKnownResourceUri,
+  isStaticResourceUri,
+  readStaticResource,
+} from "./resource-catalog.js";
 import { authenticateDevice, updateDeviceStatus } from "./device-registry.js";
 import {
   MIN_PROTOCOL_VERSION,
@@ -22,6 +31,7 @@ import {
 
 // Allow time for local confirmation UX (~90s) plus tool execution headroom.
 const TOOL_TIMEOUT_MS = 180_000;
+const RESOURCE_TIMEOUT_MS = 30_000;
 
 type ToolResultPayload = {
   type: "tool_result";
@@ -44,12 +54,29 @@ interface PendingTool {
   chunks: string[];
 }
 
+type ResourceResultPayload = {
+  type: "resource_result";
+  contents: ResourceResultMessage["contents"];
+};
+
+type ResourceErrorPayload = {
+  type: "resource_error";
+  error: { code: string; message: string };
+};
+
+interface PendingResource {
+  resolve: (value: ResourceResultPayload | ResourceErrorPayload) => void;
+  reject: (reason: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 export class TunnelDO implements DurableObject {
   private ws: WebSocket | null = null;
   private deviceId: string | null = null;
   private expectedDeviceId: string | null = null;
   private sessionId: string | null = null;
   private pendingTools = new Map<string, PendingTool>();
+  private pendingResources = new Map<string, PendingResource>();
   private env: Env;
 
   constructor(_ctx: DurableObjectState, env: Env) {
@@ -202,6 +229,20 @@ export class TunnelDO implements DurableObject {
         });
         break;
       }
+      case "resource_result": {
+        this.resolveResourceResult(msg.id, {
+          type: "resource_result",
+          contents: msg.contents,
+        });
+        break;
+      }
+      case "resource_error": {
+        this.resolveResourceResult(msg.id, {
+          type: "resource_error",
+          error: msg.error,
+        });
+        break;
+      }
       case "heartbeat": {
         if (this.deviceId) {
           await updateDeviceStatus(this.env, this.deviceId, "online");
@@ -223,6 +264,11 @@ export class TunnelDO implements DurableObject {
       pending.reject(new Error("WebSocket disconnected"));
     }
     this.pendingTools.clear();
+    for (const pending of this.pendingResources.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error("WebSocket disconnected"));
+    }
+    this.pendingResources.clear();
     this.ws = null;
     this.deviceId = null;
     this.sessionId = null;
@@ -262,6 +308,155 @@ export class TunnelDO implements DurableObject {
     this.pendingTools.delete(id);
   }
 
+  private resolveResourceResult(
+    id: string,
+    value: ResourceResultPayload | ResourceErrorPayload
+  ): void {
+    const pending = this.pendingResources.get(id);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pending.resolve(value);
+    this.pendingResources.delete(id);
+  }
+
+  private async handleResourcesRead(
+    id: string | number | null,
+    params?: {
+      uri?: string;
+      arguments?: Record<string, unknown>;
+      deviceId?: string;
+    }
+  ): Promise<Response> {
+    const uri = params?.uri;
+    if (!uri || typeof uri !== "string") {
+      return jsonRpcError(
+        id,
+        "INVALID_ARGUMENTS",
+        "Missing params.uri",
+        JsonRpcCode.INVALID_PARAMS,
+        400
+      );
+    }
+
+    if (!isKnownResourceUri(uri)) {
+      return jsonRpcError(
+        id,
+        "NOT_FOUND",
+        `Resource '${uri}' not found`,
+        JsonRpcCode.METHOD_NOT_FOUND,
+        404
+      );
+    }
+
+    if (isStaticResourceUri(uri)) {
+      const content = await readStaticResource(uri, this.env);
+      if (!content) {
+        return jsonRpcError(
+          id,
+          "NOT_FOUND",
+          `Resource '${uri}' not found`,
+          JsonRpcCode.METHOD_NOT_FOUND,
+          404
+        );
+      }
+      return jsonRpcResponse(id, { contents: [content] });
+    }
+
+    if (!isDaemonResourceUri(uri)) {
+      return jsonRpcError(
+        id,
+        "NOT_FOUND",
+        `Resource '${uri}' not found`,
+        JsonRpcCode.METHOD_NOT_FOUND,
+        404
+      );
+    }
+
+    if (!this.ws || !this.deviceId) {
+      return jsonRpcError(
+        id,
+        "DEVICE_OFFLINE",
+        "No daemon connected",
+        JsonRpcCode.SERVER_ERROR,
+        503
+      );
+    }
+
+    const requestId = crypto.randomUUID();
+    const readMsg: ReadResourceMessage = {
+      type: "read_resource",
+      id: requestId,
+      uri,
+      args: params?.arguments ?? {},
+    };
+
+    return new Promise<Response>((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingResources.delete(requestId);
+        resolve(
+          jsonRpcError(
+            id,
+            "RESOURCE_TIMEOUT",
+            "Resource read timed out",
+            JsonRpcCode.SERVER_ERROR,
+            504
+          )
+        );
+      }, RESOURCE_TIMEOUT_MS);
+
+      this.pendingResources.set(requestId, {
+        resolve: (value) => {
+          if (value.type === "resource_error") {
+            const code = value.error.code || "INTERNAL_ERROR";
+            const http =
+              code === "NOT_FOUND"
+                ? 404
+                : code === "DEVICE_OFFLINE"
+                  ? 503
+                  : 500;
+            const rpc =
+              code === "NOT_FOUND"
+                ? JsonRpcCode.METHOD_NOT_FOUND
+                : JsonRpcCode.SERVER_ERROR;
+            resolve(
+              jsonRpcError(id, code, value.error.message, rpc, http)
+            );
+            return;
+          }
+          resolve(jsonRpcResponse(id, { contents: value.contents }));
+        },
+        reject: () => {
+          resolve(
+            jsonRpcError(
+              id,
+              "DEVICE_OFFLINE",
+              "Daemon disconnected while reading resource",
+              JsonRpcCode.SERVER_ERROR,
+              503
+            )
+          );
+        },
+        timer,
+      });
+
+      try {
+        this.ws!.send(JSON.stringify(readMsg) + "\n");
+      } catch {
+        this.pendingResources.delete(requestId);
+        clearTimeout(timer);
+        resolve(
+          jsonRpcError(
+            id,
+            "DEVICE_OFFLINE",
+            "Failed to send resource request to daemon",
+            JsonRpcCode.SERVER_ERROR,
+            503
+          )
+        );
+      }
+    });
+  }
+
   private async handleMcpRequest(request: Request): Promise<Response> {
     if (request.method === "GET") {
       return jsonRpcResponse("0", { tools: TOOL_CATALOG });
@@ -278,6 +473,7 @@ export class TunnelDO implements DurableObject {
         name?: string;
         arguments?: Record<string, unknown>;
         deviceId?: string;
+        uri?: string;
       };
     };
     try {
@@ -301,7 +497,7 @@ export class TunnelDO implements DurableObject {
         capabilities: {
           tools: {},
           prompts: {},
-          resources: {},
+          resources: { subscribe: false, listChanged: false },
         },
         serverInfo: {
           name: "DeckAgent",
@@ -348,7 +544,11 @@ export class TunnelDO implements DurableObject {
     }
 
     if (method === "resources/list") {
-      return jsonRpcResponse(id, { resources: [] });
+      return jsonRpcResponse(id, { resources: RESOURCE_CATALOG });
+    }
+
+    if (method === "resources/read") {
+      return this.handleResourcesRead(id, body.params);
     }
 
     if (method === "tools/call") {

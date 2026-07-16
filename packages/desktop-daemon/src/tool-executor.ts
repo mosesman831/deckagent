@@ -7,8 +7,12 @@ import {
   killAllActiveCommands,
   setMaxFileReadSize,
 } from "@deckagent/mcp-server";
-import type { Policy } from "./policy.js";
-import { checkToolAllowed, applyPathDefaults } from "./policy.js";
+import type { Policy, WorkspacePolicy } from "./policy.js";
+import {
+  checkToolAllowed,
+  applyPathDefaults,
+  resolveArgsPaths,
+} from "./policy.js";
 import type { Logger } from "./logger.js";
 import {
   ConfirmationServer,
@@ -40,6 +44,8 @@ export interface ToolExecutorOptions {
   logger: Logger;
   confirmationServer: ConfirmationServer;
   toolTimeoutSeconds: number;
+  /** Active workspace from config (Wave 3 F1). */
+  workspace?: WorkspacePolicy | null;
   /** Override audit log directory (tests). */
   auditLogDir?: string;
 }
@@ -51,6 +57,7 @@ export interface ToolExecutorOptions {
 export class ToolExecutor {
   private toolRegistry: ToolRegistry;
   private policy: Policy;
+  private workspace: WorkspacePolicy | null;
   private logger: Logger;
   private confirmationServer: ConfirmationServer;
   private toolTimeoutSeconds: number;
@@ -60,6 +67,7 @@ export class ToolExecutor {
   constructor(options: ToolExecutorOptions) {
     this.toolRegistry = options.toolRegistry;
     this.policy = options.policy;
+    this.workspace = options.workspace ?? null;
     this.logger = options.logger;
     this.confirmationServer = options.confirmationServer;
     this.toolTimeoutSeconds = options.toolTimeoutSeconds;
@@ -74,6 +82,18 @@ export class ToolExecutor {
     }
   }
 
+  getPolicy(): Policy {
+    return this.policy;
+  }
+
+  getWorkspace(): WorkspacePolicy | null {
+    return this.workspace;
+  }
+
+  getAuditLogDir(): string | undefined {
+    return this.auditLogDir;
+  }
+
   updatePolicy(policy: Policy): void {
     this.policy = policy;
     try {
@@ -81,6 +101,10 @@ export class ToolExecutor {
     } catch {
       // ignore
     }
+  }
+
+  updateWorkspace(workspace: WorkspacePolicy | null | undefined): void {
+    this.workspace = workspace ?? null;
   }
 
   abortAll(): void {
@@ -117,6 +141,12 @@ export class ToolExecutor {
     // Never trust client-controlled confirmation bypass from remote MCP/Worker.
     const args = stripRemoteBypass(rawArgs);
     const argsWithDefaults = applyPathDefaults(tool, args);
+    // Absolutize paths for policy + execution (relative → workspace root).
+    const resolvedArgs = resolveArgsPaths(
+      tool,
+      argsWithDefaults,
+      this.workspace?.root ?? null,
+    );
 
     let outcome: ToolExecutionOutcome = {
       ok: false,
@@ -125,12 +155,17 @@ export class ToolExecutor {
     };
 
     try {
-      const policyResult = checkToolAllowed(tool, argsWithDefaults, this.policy);
+      const policyResult = checkToolAllowed(
+        tool,
+        resolvedArgs,
+        this.policy,
+        this.workspace,
+      );
 
       if (!policyResult.allowed) {
         outcome = {
           ok: false,
-          code: "POLICY_BLOCKED",
+          code: policyResult.code ?? "POLICY_BLOCKED",
           message: policyResult.reason || "Blocked by policy",
         };
         return outcome;
@@ -139,7 +174,7 @@ export class ToolExecutor {
       if (policyResult.requiresConfirmation) {
         const confirmed = await this.awaitLocalConfirmation(
           tool,
-          argsWithDefaults,
+          resolvedArgs,
           policyResult.confirmationReason || `Tool '${tool}' requires confirmation`,
         );
         if (!confirmed.ok) {
@@ -148,13 +183,13 @@ export class ToolExecutor {
         }
       }
 
-      const sizeCheck = checkFileReadSize(tool, argsWithDefaults, this.policy);
+      const sizeCheck = checkFileReadSize(tool, resolvedArgs, this.policy);
       if (!sizeCheck.ok) {
         outcome = sizeCheck;
         return outcome;
       }
 
-      const timeout = this.resolveTimeout(tool, argsWithDefaults);
+      const timeout = this.resolveTimeout(tool, resolvedArgs);
       const controller = new AbortController();
       this.activeExecutions.set(id, controller);
 
@@ -173,11 +208,11 @@ export class ToolExecutor {
         const runTool = () => {
           if (tool === "execute_command_stream" && options?.onProgress) {
             return execute_command_stream(
-              argsWithDefaults as { command: string; workdir?: string },
+              resolvedArgs as { command: string; workdir?: string },
               options.onProgress,
             );
           }
-          return this.toolRegistry.execute(tool, argsWithDefaults);
+          return this.toolRegistry.execute(tool, resolvedArgs);
         };
 
         const result = (await this.runWithAbort(
@@ -213,7 +248,7 @@ export class ToolExecutor {
           ts: new Date().toISOString(),
           id,
           tool,
-          args_summary: summarizeArgsForAudit(argsWithDefaults),
+          args_summary: summarizeArgsForAudit(resolvedArgs),
           outcome: outcome.ok ? "ok" : "error",
           code: outcome.ok ? undefined : outcome.code,
           duration_ms: Date.now() - started,

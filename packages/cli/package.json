@@ -16,7 +16,7 @@
     "bundle:assets": "node ../../scripts/bundle-cli-assets.mjs",
     "build": "tsc",
     "prepack": "npm run bundle:assets && npm run build",
-    "test": "npm run build && node test/write-worker-config.test.mjs && node test/resolve-paths.test.mjs",
+    "test": "npm run build && node test/write-worker-config.test.mjs && node test/resolve-paths.test.mjs && node test/workspace.test.mjs",
     "prepublishOnly": "npm run prepack"
   },
   "engines": {

@@ -9,7 +9,7 @@ import {
   killAllActiveCommands,
   type ToolRegistry,
 } from "@deckagent/mcp-server";
-import { readConfig, getConfigPath } from "./config.js";
+import { readConfig, getConfigPath, applyWorkspaceContext } from "./config.js";
 import { readPolicy, getPolicyPath, type Policy } from "./policy.js";
 import { Logger } from "./logger.js";
 import { TunnelClient } from "./tunnel-client.js";
@@ -178,6 +178,20 @@ async function main(): Promise<void> {
     );
   }
 
+  // Wave 3 F1: apply workspace context so relative tool paths resolve correctly.
+  try {
+    applyWorkspaceContext(config.workspace);
+    if (config.workspace) {
+      logger.info(
+        `Workspace active: ${config.workspace.name} (${config.workspace.root})`,
+      );
+    }
+  } catch (err) {
+    logger.warn(
+      `Failed to apply workspace context: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
   if (policy.allow_browser) {
     logger.info("Browser tools enabled for this session");
   } else {
@@ -191,6 +205,7 @@ async function main(): Promise<void> {
     logger,
     confirmationServer,
     toolTimeoutSeconds: config.tool_timeout,
+    workspace: config.workspace ?? null,
   });
 
   const localServer = new LocalTunnelServer(executor, logger);

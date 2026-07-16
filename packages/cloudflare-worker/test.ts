@@ -8,10 +8,23 @@ import {
   hashToken,
   isDeviceOnline,
   listOnlineDevices,
+  listRegisteredDeviceIds,
 } from "./src/device-registry.js";
 import { verifyApiToken } from "./src/auth.js";
 import { TOOL_CATALOG, TOOL_NAMES } from "./src/tool-catalog.js";
 import { tools as mcpHandlerTools } from "./src/mcp-handler.js";
+import {
+  RESOURCE_CATALOG,
+  isKnownResourceUri,
+  isStaticResourceUri,
+  isDaemonResourceUri,
+  readStaticResource,
+} from "./src/resource-catalog.js";
+import {
+  MCP_INSTRUCTIONS,
+  PROMPT_CATALOG,
+  isKnownPrompt,
+} from "./src/prompt-catalog.js";
 import {
   checkProtocolVersion,
   MIN_PROTOCOL_VERSION,
@@ -283,7 +296,11 @@ async function main() {
   const initBody = (await initRes.json()) as {
     result?: {
       instructions?: string;
-      capabilities?: { prompts?: unknown; tools?: unknown };
+      capabilities?: {
+        prompts?: unknown;
+        tools?: unknown;
+        resources?: { subscribe?: boolean; listChanged?: boolean };
+      };
       serverInfo?: {
         name?: string;
         version?: string;
@@ -299,6 +316,11 @@ async function main() {
   assert(
     initBody.result?.capabilities?.prompts !== undefined,
     "initialize advertises prompts capability"
+  );
+  assert(
+    initBody.result?.capabilities?.resources?.subscribe === false &&
+      initBody.result?.capabilities?.resources?.listChanged === false,
+    "initialize advertises resources { subscribe: false, listChanged: false }"
   );
   assert(
     initBody.result?.serverInfo?.version === WORKER_VERSION,
@@ -330,9 +352,11 @@ async function main() {
   };
   assert(
     Array.isArray(promptsBody.result?.prompts) &&
-      promptsBody.result!.prompts!.some((p) => p.name === "deckagent_system"),
-    "prompts/list includes deckagent_system"
+      promptsBody.result!.prompts!.some((p) => p.name === "deckagent_system") &&
+      promptsBody.result!.prompts!.some((p) => p.name === "deckagent_workspace"),
+    "prompts/list includes deckagent_system and deckagent_workspace"
   );
+  assert(isKnownPrompt("deckagent_workspace"), "deckagent_workspace is known");
 
   const promptGetRes = await worker.fetch(
     new Request(url("/mcp"), {
@@ -376,11 +400,154 @@ async function main() {
     env
   );
   const resourcesBody = (await resourcesRes.json()) as {
-    result?: { resources?: unknown[] };
+    result?: { resources?: Array<{ uri: string }> };
   };
   assert(
-    Array.isArray(resourcesBody.result?.resources),
-    "resources/list returns empty array"
+    Array.isArray(resourcesBody.result?.resources) &&
+      resourcesBody.result!.resources!.length >= 5,
+    `resources/list returns >=5 entries (got ${resourcesBody.result?.resources?.length})`
+  );
+  assert(
+    RESOURCE_CATALOG.length === 6 &&
+      resourcesBody.result!.resources!.length === RESOURCE_CATALOG.length,
+    "resources/list matches RESOURCE_CATALOG"
+  );
+
+  // --- 5c. MCP resources catalog + static reads ---
+  console.log("\n5c. MCP resources catalog / static reads");
+  assert(isKnownResourceUri("deckagent://about"), "about URI known");
+  assert(isStaticResourceUri("deckagent://about"), "about is static");
+  assert(isDaemonResourceUri("deckagent://policy"), "policy is daemon-backed");
+  assert(
+    !isStaticResourceUri("deckagent://policy"),
+    "policy is not static"
+  );
+
+  const aboutRes = await worker.fetch(
+    new Request(url("/mcp"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${API_TOKEN}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 6,
+        method: "resources/read",
+        params: { uri: "deckagent://about" },
+      }),
+    }),
+    env
+  );
+  const aboutBody = (await aboutRes.json()) as {
+    result?: { contents?: Array<{ uri?: string; text?: string; mimeType?: string }> };
+  };
+  assert(aboutRes.status === 200, `resources/read about → 200 (got ${aboutRes.status})`);
+  assert(
+    aboutBody.result?.contents?.[0]?.text?.includes("DeckAgent") === true,
+    "about resource contains DeckAgent"
+  );
+  assert(
+    aboutBody.result?.contents?.[0]?.mimeType === "text/markdown",
+    "about mimeType text/markdown"
+  );
+
+  const instrRes = await worker.fetch(
+    new Request(url("/mcp"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${API_TOKEN}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 7,
+        method: "resources/read",
+        params: { uri: "deckagent://session/instructions" },
+      }),
+    }),
+    env
+  );
+  const instrBody = (await instrRes.json()) as {
+    result?: { contents?: Array<{ text?: string }> };
+  };
+  assert(
+    instrBody.result?.contents?.[0]?.text === MCP_INSTRUCTIONS,
+    "session/instructions matches MCP_INSTRUCTIONS"
+  );
+
+  await updateDeviceStatus(env, deviceId, "online");
+  const devicesStatic = await readStaticResource("deckagent://devices", env);
+  assert(devicesStatic !== null, "devices static resource resolves");
+  const devicesParsed = JSON.parse(devicesStatic!.text) as {
+    devices?: Array<{ id: string; status: string }>;
+  };
+  assert(
+    Array.isArray(devicesParsed.devices) &&
+      devicesParsed.devices.some((d) => d.id === deviceId && d.status === "online"),
+    "devices resource includes online registered device"
+  );
+  assert(
+    (await listRegisteredDeviceIds(env)).includes(deviceId),
+    "listRegisteredDeviceIds includes test device"
+  );
+
+  const unknownRes = await worker.fetch(
+    new Request(url("/mcp"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${API_TOKEN}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 8,
+        method: "resources/read",
+        params: { uri: "deckagent://nope" },
+      }),
+    }),
+    env
+  );
+  const unknownBody = (await unknownRes.json()) as {
+    error?: { data?: { code?: string } };
+  };
+  assert(unknownRes.status === 404, `unknown URI → 404 (got ${unknownRes.status})`);
+  assert(
+    unknownBody.error?.data?.code === "NOT_FOUND",
+    "unknown URI → NOT_FOUND"
+  );
+
+  // Daemon-backed resource without online device → DEVICE_OFFLINE
+  await updateDeviceStatus(env, deviceId, "offline");
+  // Also clear other online devices from section that may not have run yet
+  const policyOfflineRes = await worker.fetch(
+    new Request(url("/mcp"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${API_TOKEN}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 9,
+        method: "resources/read",
+        params: { uri: "deckagent://policy" },
+      }),
+    }),
+    env
+  );
+  const policyOfflineBody = (await policyOfflineRes.json()) as {
+    error?: { data?: { code?: string } };
+  };
+  assert(
+    policyOfflineRes.status === 503 &&
+      policyOfflineBody.error?.data?.code === "DEVICE_OFFLINE",
+    "policy read with no daemon → DEVICE_OFFLINE"
+  );
+
+  assert(
+    PROMPT_CATALOG.some((p) => p.name === "deckagent_workspace"),
+    "PROMPT_CATALOG includes deckagent_workspace"
   );
 
   // CORS: Origin echoed, not *

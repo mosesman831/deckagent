@@ -17,6 +17,7 @@ import {
 import { askYesNo, getConfigDir } from './configure.js';
 import { runDoctor } from './doctor.js';
 import { runTunnel } from './tunnel.js';
+import { runWorkspaceCommand } from './workspace.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -40,6 +41,9 @@ Usage:
   deckagent daemon --status    Check if the daemon is running
   deckagent logs [--follow] [--lines N]  Tail daemon logs (follows on TTY by default)
   deckagent tunnel [--name NAME] [--url URL]  Cloudflare Tunnel to local wrangler (dev)
+  deckagent workspace use <path>  Set active workspace (project scope)
+  deckagent workspace status   Show current workspace
+  deckagent workspace clear    Clear workspace from config
   deckagent doctor             Check DeckAgent health and prerequisites
   deckagent uninstall          Stop daemon and remove config
   deckagent version            Print version
@@ -133,6 +137,11 @@ async function main(): Promise<void> {
 
     case 'doctor': {
       await runDoctor();
+      break;
+    }
+
+    case 'workspace': {
+      runWorkspaceCommand(args.slice(1));
       break;
     }
 

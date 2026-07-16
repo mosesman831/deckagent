@@ -7,6 +7,13 @@ import {
   getPromptMessages,
   isKnownPrompt,
 } from "./prompt-catalog.js";
+import {
+  RESOURCE_CATALOG,
+  isDaemonResourceUri,
+  isKnownResourceUri,
+  isStaticResourceUri,
+  readStaticResource,
+} from "./resource-catalog.js";
 import { resolveTargetDeviceId } from "./device-registry.js";
 import {
   MIN_PROTOCOL_VERSION,
@@ -15,6 +22,7 @@ import {
 
 export { TOOL_CATALOG as tools } from "./tool-catalog.js";
 export { PROMPT_CATALOG, MCP_INSTRUCTIONS } from "./prompt-catalog.js";
+export { RESOURCE_CATALOG } from "./resource-catalog.js";
 
 type JsonRpcId = string | number | null;
 
@@ -58,12 +66,14 @@ function deckCodeToRpc(deckCode: string): number {
   switch (deckCode) {
     case "METHOD_NOT_FOUND":
     case "TOOL_NOT_FOUND":
+    case "NOT_FOUND":
       return JsonRpcCode.METHOD_NOT_FOUND;
     case "INVALID_ARGUMENTS":
     case "DEVICE_AMBIGUOUS":
       return JsonRpcCode.INVALID_PARAMS;
     case "DEVICE_OFFLINE":
     case "TOOL_TIMEOUT":
+    case "RESOURCE_TIMEOUT":
       return JsonRpcCode.SERVER_ERROR;
     default:
       return JsonRpcCode.SERVER_ERROR;
@@ -74,6 +84,7 @@ function deckCodeToHttp(deckCode: string): number {
   switch (deckCode) {
     case "METHOD_NOT_FOUND":
     case "TOOL_NOT_FOUND":
+    case "NOT_FOUND":
       return 404;
     case "INVALID_ARGUMENTS":
     case "DEVICE_AMBIGUOUS":
@@ -81,6 +92,7 @@ function deckCodeToHttp(deckCode: string): number {
     case "DEVICE_OFFLINE":
       return 503;
     case "TOOL_TIMEOUT":
+    case "RESOURCE_TIMEOUT":
       return 504;
     default:
       return 500;
@@ -115,6 +127,7 @@ export async function handleMcpRequest(
       name?: string;
       arguments?: Record<string, unknown>;
       deviceId?: string;
+      uri?: string;
     };
   };
   try {
@@ -138,7 +151,7 @@ export async function handleMcpRequest(
         capabilities: {
           tools: {},
           prompts: {},
-          resources: {},
+          resources: { subscribe: false, listChanged: false },
         },
         serverInfo: {
           name: env.APP_NAME || "DeckAgent",
@@ -194,8 +207,86 @@ export async function handleMcpRequest(
   }
 
   if (method === "resources/list") {
-    // No static resources yet — return empty list so playgrounds don't 404.
-    return jsonRpcResponse(id, { resources: [] }, cors);
+    return jsonRpcResponse(id, { resources: RESOURCE_CATALOG }, cors);
+  }
+
+  if (method === "resources/read") {
+    const uri = body.params?.uri;
+    if (!uri || typeof uri !== "string") {
+      return jsonRpcError(id, "INVALID_ARGUMENTS", "Missing params.uri", {
+        rpcCode: JsonRpcCode.INVALID_PARAMS,
+        httpStatus: 400,
+        cors,
+      });
+    }
+
+    if (!isKnownResourceUri(uri)) {
+      return jsonRpcError(id, "NOT_FOUND", `Resource '${uri}' not found`, {
+        rpcCode: JsonRpcCode.METHOD_NOT_FOUND,
+        httpStatus: 404,
+        cors,
+      });
+    }
+
+    if (isStaticResourceUri(uri)) {
+      const content = await readStaticResource(uri, env);
+      if (!content) {
+        return jsonRpcError(id, "NOT_FOUND", `Resource '${uri}' not found`, {
+          rpcCode: JsonRpcCode.METHOD_NOT_FOUND,
+          httpStatus: 404,
+          cors,
+        });
+      }
+      return jsonRpcResponse(id, { contents: [content] }, cors);
+    }
+
+    if (isDaemonResourceUri(uri)) {
+      const requestedDeviceId = body.params?.deviceId;
+      const resolved = await resolveTargetDeviceId(env, requestedDeviceId);
+      if ("error" in resolved) {
+        return jsonRpcError(id, resolved.error, resolved.message, {
+          rpcCode: deckCodeToRpc(resolved.error),
+          httpStatus: deckCodeToHttp(resolved.error),
+          cors,
+        });
+      }
+
+      const doId = env.TUNNEL_DO.idFromName(resolved.deviceId);
+      const stub = env.TUNNEL_DO.get(doId);
+      const forwardBody = JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        method: "resources/read",
+        params: {
+          uri,
+          deviceId: resolved.deviceId,
+          arguments: body.params?.arguments ?? {},
+        },
+      });
+
+      const doResponse = await stub.fetch(
+        new Request("https://tunnel-do/mcp", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: forwardBody,
+        })
+      );
+
+      const headers = new Headers(doResponse.headers);
+      for (const [k, v] of Object.entries(cors)) {
+        headers.set(k, v);
+      }
+      return new Response(doResponse.body, {
+        status: doResponse.status,
+        headers,
+      });
+    }
+
+    return jsonRpcError(id, "NOT_FOUND", `Resource '${uri}' not found`, {
+      rpcCode: JsonRpcCode.METHOD_NOT_FOUND,
+      httpStatus: 404,
+      cors,
+    });
   }
 
   if (method === "tools/call") {

@@ -125,11 +125,22 @@ All config lives in `~/.deckagent/`:
 
 ```
 ~/.deckagent/
-├── config.json      # device_id, token, worker_url, preferences
-├── policy.json      # allowed dirs, blocked commands, confirmations
+├── config.json      # device_id, token, worker_url, workspace, preferences
+├── policy.json      # allowed dirs, blocked commands, confirmations, budgets
 └── logs/
-    └── deckagent-YYYY-MM-DD.log
+    ├── deckagent-YYYY-MM-DD.log
+    └── audit.jsonl
 ```
+
+### Workspace (project scope)
+
+```bash
+deckagent workspace use ~/code/myapp   # scope relative paths + outside-tree confirmation
+deckagent workspace status
+deckagent workspace clear
+```
+
+Agents see `workspace_root` / `workspace_name` from `get_environment`, and can read `deckagent://workspace` via MCP resources.
 
 ## v2 Browser Extension 🧩
 

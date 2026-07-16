@@ -2,8 +2,16 @@ import { z } from "zod";
 import { homedir } from "node:os";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { setWorkspaceContext } from "@deckagent/mcp-server";
 
 const ConfigPathSchema = z.string();
+
+/** Optional project scope (Wave 3 F1). Backward compatible when omitted. */
+export const WorkspaceSchema = z.object({
+  root: z.string(),
+  name: z.string(),
+  allow_outside_with_confirmation: z.boolean().default(true),
+});
 
 export const ConfigSchema = z.object({
   device_id: z.string().uuid(),
@@ -14,9 +22,11 @@ export const ConfigSchema = z.object({
   tool_timeout: z.number().int().min(1).max(300).default(60),
   auto_connect: z.boolean().default(true),
   log_level: z.enum(["info", "debug", "error", "warn"]).default("info"),
+  workspace: WorkspaceSchema.optional(),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
+export type WorkspaceConfig = z.infer<typeof WorkspaceSchema>;
 
 export function getConfigPath(): string {
   const envPath = process.env.DECKAGENT_CONFIG;
@@ -69,6 +79,25 @@ export function writeConfig(config: Config, path = getConfigPath()): void {
   } catch (err) {
     throw new Error(`Failed to write config file: ${path} (${humanError(err)})`);
   }
+}
+
+/** Apply workspace to mcp-server context (or clear when undefined). */
+export function applyWorkspaceContext(workspace: WorkspaceConfig | undefined): void {
+  if (workspace) {
+    setWorkspaceContext({ root: workspace.root, name: workspace.name });
+  } else {
+    setWorkspaceContext({ root: null, name: null });
+  }
+}
+
+/**
+ * Re-read config and apply workspace to mcp-server context.
+ * Useful for tests and optional runtime refresh after `deckagent workspace use`.
+ */
+export function refreshWorkspaceFromConfig(path = getConfigPath()): WorkspaceConfig | undefined {
+  const config = readConfig(path);
+  applyWorkspaceContext(config.workspace);
+  return config.workspace;
 }
 
 function humanError(err: unknown): string {

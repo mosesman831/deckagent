@@ -1,6 +1,6 @@
 # DeckAgent — Next Features Plan & Spec (Wave 3)
 
-> Status: **SPEC ONLY** — not implemented yet.  
+> Status: **3.1 IN PROGRESS / PARTIAL** — F1 Workspaces + F2 MCP Resources implemented.  
 > Assumes Wave 1 (core bridge) + Wave 2 (production readiness + audit/allowlist/packaging/prompts) are working.
 
 ---
@@ -29,8 +29,8 @@ Non-goals for Wave 3:
 
 | ID | Feature | Why | Priority |
 |----|---------|-----|----------|
-| F1 | **Workspaces (project scope)** | Stop agents wandering into `$HOME`; one-command “work on this repo” | **P0** |
-| F2 | **MCP Resources** | Playgrounds + Claude/Cursor can browse audit/policy/devices without new tools | **P0** |
+| F1 | **Workspaces (project scope)** | Stop agents wandering into `$HOME`; one-command “work on this repo” | **P0 ✅ done (3.1)** |
+| F2 | **MCP Resources** | Playgrounds + Claude/Cursor can browse audit/policy/devices without new tools | **P0 ✅ done (3.1)** |
 | F3 | **Edit snapshots + undo** | Trust for `write_file` / `edit_file` | **P0** |
 | F4 | **Secrets vault** | `execute_command` can use `GITHUB_TOKEN` without the model seeing it | **P0** |
 | F5 | **Local control UI** (`127.0.0.1:9150`) | Approvals queue, live status, recent audit, policy toggles | **P1** |

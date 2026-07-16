@@ -17,8 +17,10 @@ import {
   isCommandAllowed,
   isPathAllowed,
   applyPathDefaults,
+  resolveArgsPaths,
   createDefaultPolicy,
   type Policy,
+  type WorkspacePolicy,
 } from "./src/policy.js";
 import {
   ConfirmationServer,
@@ -29,11 +31,21 @@ import {
   appendAuditLog,
   summarizeArgsForAudit,
   getAuditLogPath,
+  readRecentAuditLog,
 } from "./src/audit-log.js";
 import { sendDesktopNotification } from "./src/notify.js";
 import { ToolExecutor } from "./src/tool-executor.js";
 import { DAEMON_VERSION, PROTOCOL_VERSION } from "./src/version.js";
+import {
+  ConfigSchema,
+  WorkspaceSchema,
+} from "./src/config.js";
+import {
+  listLocalResourceTemplates,
+  readLocalResource,
+} from "./src/resources.js";
 import type { ToolRegistry } from "@deckagent/mcp-server";
+import { resolve as resolvePath } from "node:path";
 
 let passed = 0;
 let failed = 0;
@@ -475,6 +487,247 @@ async function testConfirmationFlow(): Promise<void> {
   }
 }
 
+function testConfigWorkspaceSchema(): void {
+  section("config schema with workspace");
+
+  const base = {
+    device_id: "11111111-1111-4111-8111-111111111111",
+    token: "a".repeat(32),
+    worker_url: "https://example.workers.dev",
+    device_name: "test-device",
+  };
+
+  const without = ConfigSchema.parse(base);
+  assertEqual(without.workspace, undefined, "workspace optional when omitted");
+
+  const withWs = ConfigSchema.parse({
+    ...base,
+    workspace: {
+      root: "/tmp/myapp",
+      name: "myapp",
+    },
+  });
+  assert(withWs.workspace !== undefined, "workspace present when provided");
+  assertEqual(withWs.workspace!.root, "/tmp/myapp", "workspace root");
+  assertEqual(withWs.workspace!.name, "myapp", "workspace name");
+  assertEqual(
+    withWs.workspace!.allow_outside_with_confirmation,
+    true,
+    "allow_outside_with_confirmation defaults true",
+  );
+
+  const explicit = WorkspaceSchema.parse({
+    root: "/home/me/proj",
+    name: "proj",
+    allow_outside_with_confirmation: false,
+  });
+  assertEqual(
+    explicit.allow_outside_with_confirmation,
+    false,
+    "allow_outside can be false",
+  );
+}
+
+function testWorkspacePathEnforcement(): void {
+  section("workspace outside-path confirmation/deny");
+
+  const wsRoot = mkdtempSync(join(tmpdir(), "deckagent-ws-"));
+  try {
+    const policy: Policy = {
+      ...createDefaultPolicy(),
+      allowed_directories: [homedir(), wsRoot, tmpdir()],
+      require_confirmation: [],
+    };
+
+    const workspaceAllow: WorkspacePolicy = {
+      root: wsRoot,
+      name: "test-ws",
+      allow_outside_with_confirmation: true,
+    };
+
+    const inside = checkToolAllowed(
+      "read_file",
+      { path: "src/index.ts" },
+      policy,
+      workspaceAllow,
+    );
+    assert(inside.allowed, "relative path inside workspace allowed");
+    assert(!inside.requiresConfirmation, "inside path no confirmation");
+
+    const resolved = resolveArgsPaths(
+      "read_file",
+      { path: "src/index.ts" },
+      wsRoot,
+    );
+    assertEqual(
+      resolved.path,
+      resolvePath(wsRoot, "src/index.ts"),
+      "resolveArgsPaths absolutizes against workspace",
+    );
+
+    const outsideConfirm = checkToolAllowed(
+      "read_file",
+      { path: join(homedir(), "outside-file.txt") },
+      policy,
+      workspaceAllow,
+    );
+    assert(outsideConfirm.allowed, "outside path structurally allowed");
+    assertEqual(
+      outsideConfirm.requiresConfirmation,
+      true,
+      "outside path requires confirmation when allow_outside",
+    );
+    assertEqual(
+      outsideConfirm.confirmationReason,
+      "Path outside workspace",
+      "confirmation reason is Path outside workspace",
+    );
+
+    const workspaceDeny: WorkspacePolicy = {
+      root: wsRoot,
+      name: "test-ws",
+      allow_outside_with_confirmation: false,
+    };
+    const outsideDeny = checkToolAllowed(
+      "read_file",
+      { path: join(homedir(), "outside-file.txt") },
+      policy,
+      workspaceDeny,
+    );
+    assert(!outsideDeny.allowed, "outside path denied when allow_outside false");
+    assertEqual(outsideDeny.code, "ACCESS_DENIED", "deny code is ACCESS_DENIED");
+    assert(
+      (outsideDeny.reason || "").includes("ACCESS_DENIED") ||
+        (outsideDeny.reason || "").includes("outside workspace"),
+      "deny reason mentions outside workspace",
+    );
+  } finally {
+    rmSync(wsRoot, { recursive: true, force: true });
+  }
+}
+
+function testLocalResources(): void {
+  section("resource policy/audit/workspace reads");
+
+  const templates = listLocalResourceTemplates();
+  assert(templates.length >= 3, "lists at least 3 local resource templates");
+  assert(
+    templates.some((t) => t.uri === "deckagent://policy"),
+    "includes policy resource",
+  );
+  assert(
+    templates.some((t) => t.uri === "deckagent://workspace"),
+    "includes workspace resource",
+  );
+  assert(
+    templates.some((t) => t.uri === "deckagent://audit/recent"),
+    "includes audit/recent resource",
+  );
+
+  const policy = createDefaultPolicy();
+  const policyRes = readLocalResource("deckagent://policy", {}, { policy });
+  assert(policyRes.ok, "policy resource ok");
+  if (policyRes.ok) {
+    assertEqual(policyRes.contents[0]!.mimeType, "application/json", "policy mime");
+    const parsed = JSON.parse(policyRes.contents[0]!.text) as Policy;
+    assertEqual(parsed.read_only, policy.read_only, "policy JSON matches");
+    assert(Array.isArray(parsed.allowed_directories), "policy has allowed_directories");
+  }
+
+  const emptyWs = readLocalResource("deckagent://workspace", {}, { policy });
+  assert(emptyWs.ok, "workspace resource ok without workspace");
+  if (emptyWs.ok) {
+    const parsed = JSON.parse(emptyWs.contents[0]!.text) as { root: null };
+    assertEqual(parsed.root, null, "workspace root null when unset");
+  }
+
+  const ws: WorkspacePolicy = {
+    root: "/tmp/proj",
+    name: "proj",
+    allow_outside_with_confirmation: true,
+  };
+  const withWs = readLocalResource(
+    "deckagent://workspace",
+    {},
+    { policy, workspace: ws },
+  );
+  assert(withWs.ok, "workspace resource ok with workspace");
+  if (withWs.ok) {
+    const parsed = JSON.parse(withWs.contents[0]!.text) as {
+      root: string;
+      name: string;
+    };
+    assertEqual(parsed.root, "/tmp/proj", "workspace root");
+    assertEqual(parsed.name, "proj", "workspace name");
+  }
+
+  const dir = mkdtempSync(join(tmpdir(), "deckagent-res-audit-"));
+  try {
+    appendAuditLog(
+      {
+        ts: new Date().toISOString(),
+        id: "r1",
+        tool: "get_environment",
+        args_summary: {},
+        outcome: "ok",
+        duration_ms: 1,
+        source: "tunnel",
+      },
+      { logDir: dir },
+    );
+    appendAuditLog(
+      {
+        ts: new Date().toISOString(),
+        id: "r2",
+        tool: "read_file",
+        args_summary: { path: "/x" },
+        outcome: "error",
+        code: "ACCESS_DENIED",
+        duration_ms: 2,
+        source: "local",
+      },
+      { logDir: dir },
+    );
+
+    const auditRes = readLocalResource(
+      "deckagent://audit/recent",
+      { limit: 10 },
+      { policy, auditLogDir: dir },
+    );
+    assert(auditRes.ok, "audit resource ok");
+    if (auditRes.ok) {
+      assertEqual(
+        auditRes.contents[0]!.mimeType,
+        "application/x-ndjson",
+        "audit mime ndjson",
+      );
+      const lines = auditRes.contents[0]!.text
+        .split("\n")
+        .filter((l) => l.trim());
+      assertEqual(lines.length, 2, "audit returns 2 lines");
+      assert(
+        lines[1]!.includes("ACCESS_DENIED"),
+        "audit includes ACCESS_DENIED entry",
+      );
+    }
+
+    const recent = readRecentAuditLog({ limit: 1, logDir: dir });
+    assertEqual(
+      recent.split("\n").filter((l) => l.trim()).length,
+      1,
+      "limit 1",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  const missing = readLocalResource("deckagent://devices", {}, { policy });
+  assert(!missing.ok, "unknown URI not found");
+  if (!missing.ok) {
+    assertEqual(missing.code, "NOT_FOUND", "NOT_FOUND code");
+  }
+}
+
 async function main(): Promise<void> {
   console.log("desktop-daemon smoke tests");
   testBlockedCommands();
@@ -487,6 +740,9 @@ async function main(): Promise<void> {
   testNotificationNoThrow();
   testVersionFields();
   await testConfirmationFlow();
+  testConfigWorkspaceSchema();
+  testWorkspacePathEnforcement();
+  testLocalResources();
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) {

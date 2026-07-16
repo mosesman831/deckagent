@@ -56,8 +56,17 @@ export type Policy = z.infer<typeof PolicySchema>;
 export interface PolicyResult {
   allowed: boolean;
   reason?: string;
+  /** Soft error code for tunnel (e.g. ACCESS_DENIED, POLICY_BLOCKED). */
+  code?: string;
   requiresConfirmation?: boolean;
   confirmationReason?: string;
+}
+
+/** Active workspace from config (Wave 3 F1). */
+export interface WorkspacePolicy {
+  root: string;
+  name: string;
+  allow_outside_with_confirmation: boolean;
 }
 
 const MUTATING_TOOLS = new Set([
@@ -295,10 +304,87 @@ export function applyPathDefaults(
   return next;
 }
 
+const PATH_ARG_KEYS = ["path", "source", "destination", "workdir"] as const;
+
+/**
+ * Absolutize path-bearing args before policy checks.
+ * Relative paths resolve against workspaceRoot when set; otherwise process.cwd().
+ */
+export function resolveArgsPaths(
+  _tool: string,
+  args: Record<string, unknown>,
+  workspaceRoot?: string | null,
+): Record<string, unknown> {
+  const next = { ...args };
+
+  for (const key of PATH_ARG_KEYS) {
+    const value = next[key];
+    if (typeof value === "string" && value) {
+      next[key] = absolutizeToolPath(value, workspaceRoot);
+    }
+  }
+
+  if (Array.isArray(next.paths)) {
+    next.paths = next.paths.map((p) =>
+      typeof p === "string" && p ? absolutizeToolPath(p, workspaceRoot) : p,
+    );
+  }
+
+  return next;
+}
+
+/** Expand ~ and resolve relative paths against workspace (or cwd). */
+export function absolutizeToolPath(
+  inputPath: string,
+  workspaceRoot?: string | null,
+): string {
+  const trimmed = inputPath.trim();
+  if (trimmed === "~") {
+    return homedir();
+  }
+  if (trimmed.startsWith("~/") || trimmed.startsWith("~\\")) {
+    return join(homedir(), trimmed.slice(2));
+  }
+  if (isAbsolute(trimmed)) {
+    return resolvePath(trimmed);
+  }
+  if (workspaceRoot) {
+    return resolvePath(workspaceRoot, trimmed);
+  }
+  return resolvePath(trimmed);
+}
+
+/**
+ * Returns true if target is the workspace root or a path inside it.
+ */
+export function isPathInsideWorkspace(
+  inputPath: string,
+  workspaceRoot: string,
+): boolean {
+  const resolved = resolvePathWithHome(inputPath);
+  let realPath: string;
+  try {
+    realPath = realpathSync(resolved);
+  } catch {
+    realPath = resolved;
+  }
+
+  const normalizedTarget = normalizePathForCompare(realPath);
+  const normalizedRoot = normalizePathForCompare(
+    resolvePathWithHome(workspaceRoot),
+  );
+
+  if (pathsEqual(normalizedTarget, normalizedRoot)) {
+    return true;
+  }
+  return isPathInside(normalizedTarget, normalizedRoot);
+}
+
 export function checkToolAllowed(
   toolName: string,
   args: Record<string, unknown>,
   policy: Policy,
+  workspace?: WorkspacePolicy | null,
 ): PolicyResult {
   const allTools = new Set([
     "read_file",
@@ -341,8 +427,14 @@ export function checkToolAllowed(
   }
 
   const argsWithDefaults = applyPathDefaults(toolName, args);
+  const resolvedArgs = resolveArgsPaths(
+    toolName,
+    argsWithDefaults,
+    workspace?.root ?? null,
+  );
 
-  const command = typeof argsWithDefaults.command === "string" ? argsWithDefaults.command : "";
+  const command =
+    typeof resolvedArgs.command === "string" ? resolvedArgs.command : "";
   if (command && TERMINAL_TOOLS.has(toolName)) {
     const commandCheck = checkCommandPolicy(command, policy);
     if (!commandCheck.allowed) {
@@ -350,9 +442,24 @@ export function checkToolAllowed(
     }
   }
 
-  const pathResult = checkPathAllowed(toolName, argsWithDefaults, policy);
+  // Effective allowlist = policy.allowed_directories (workspace typically inside).
+  const pathResult = checkPathAllowed(toolName, resolvedArgs, policy);
   if (!pathResult.allowed) {
     return pathResult;
+  }
+
+  const workspaceResult = checkWorkspaceBoundary(resolvedArgs, workspace);
+  if (!workspaceResult.allowed) {
+    return workspaceResult;
+  }
+
+  if (workspaceResult.requiresConfirmation) {
+    return {
+      allowed: true,
+      requiresConfirmation: true,
+      confirmationReason:
+        workspaceResult.confirmationReason || "Path outside workspace",
+    };
   }
 
   if (policy.require_confirmation.includes(toolName)) {
@@ -363,6 +470,55 @@ export function checkToolAllowed(
       allowed: true,
       requiresConfirmation: true,
       confirmationReason: reason,
+    };
+  }
+
+  return { allowed: true };
+}
+
+/**
+ * Enforce workspace boundary after allowlist check.
+ * Outside path + allow_outside_with_confirmation → confirmation.
+ * Outside path + deny → ACCESS_DENIED.
+ */
+export function checkWorkspaceBoundary(
+  args: Record<string, unknown>,
+  workspace?: WorkspacePolicy | null,
+): PolicyResult {
+  if (!workspace?.root) {
+    return { allowed: true };
+  }
+
+  const pathsToCheck: string[] = [];
+  for (const key of PATH_ARG_KEYS) {
+    const value = args[key];
+    if (typeof value === "string" && value) {
+      pathsToCheck.push(value);
+    }
+  }
+  if (Array.isArray(args.paths)) {
+    for (const p of args.paths) {
+      if (typeof p === "string" && p) pathsToCheck.push(p);
+    }
+  }
+
+  for (const p of pathsToCheck) {
+    if (isPathInsideWorkspace(p, workspace.root)) {
+      continue;
+    }
+
+    if (workspace.allow_outside_with_confirmation) {
+      return {
+        allowed: true,
+        requiresConfirmation: true,
+        confirmationReason: "Path outside workspace",
+      };
+    }
+
+    return {
+      allowed: false,
+      code: "ACCESS_DENIED",
+      reason: `ACCESS_DENIED: Path '${p}' is outside workspace '${workspace.root}'`,
     };
   }
 

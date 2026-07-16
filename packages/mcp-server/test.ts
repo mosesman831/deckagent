@@ -1,4 +1,10 @@
-import { createRegistry, execute_command_stream, closeBrowser } from "./src/index.js";
+import {
+  createRegistry,
+  execute_command_stream,
+  closeBrowser,
+  setWorkspaceContext,
+  getWorkspaceContext,
+} from "./src/index.js";
 import type { ToolResponse } from "./src/schemas.js";
 import fs from "fs/promises";
 import path from "path";
@@ -53,8 +59,65 @@ async function main() {
   {
     const env = await registry.execute("get_environment", {});
     assert(!env.isError, "get_environment should succeed");
-    assert(textOf(env).includes("os"), "get_environment should include os");
+    const envText = textOf(env);
+    assert(envText.includes("os"), "get_environment should include os");
+    const envJson = JSON.parse(envText) as {
+      workspace_root: string | null;
+      workspace_name: string | null;
+    };
+    assert(envJson.workspace_root === null, "workspace_root should be null by default");
+    assert(envJson.workspace_name === null, "workspace_name should be null by default");
     console.log("✓ get_environment");
+  }
+
+  // workspace relative paths
+  {
+    const wsRoot = path.join(TEST_ROOT, "workspace");
+    await fs.mkdir(wsRoot, { recursive: true });
+    setWorkspaceContext({ root: wsRoot, name: "smoke-ws" });
+
+    const env = await registry.execute("get_environment", {});
+    assert(!env.isError, "get_environment with workspace should succeed");
+    const envJson = JSON.parse(textOf(env)) as {
+      workspace_root: string | null;
+      workspace_name: string | null;
+    };
+    assert(envJson.workspace_root === wsRoot, "workspace_root should match set root");
+    assert(envJson.workspace_name === "smoke-ws", "workspace_name should match set name");
+
+    const writeRes = await registry.execute("write_file", {
+      path: "rel-note.txt",
+      content: "workspace-relative-content\n",
+    });
+    assert(!writeRes.isError, `workspace write_file failed: ${textOf(writeRes)}`);
+
+    const absWritten = path.join(wsRoot, "rel-note.txt");
+    const onDisk = await fs.readFile(absWritten, "utf-8");
+    assert(onDisk.includes("workspace-relative-content"), "relative write should land in workspace");
+
+    const readRes = await registry.execute("read_file", { path: "rel-note.txt" });
+    assert(!readRes.isError, `workspace read_file failed: ${textOf(readRes)}`);
+    assert(textOf(readRes).includes("workspace-relative-content"), "relative read should resolve via workspace");
+
+    const cmdRes = await registry.execute("execute_command", {
+      command: "pwd",
+      workdir: ".",
+    });
+    assert(!cmdRes.isError, `workspace execute_command failed: ${textOf(cmdRes)}`);
+    assert(textOf(cmdRes).includes(wsRoot), "relative workdir should resolve via workspace");
+
+    setWorkspaceContext({ root: null, name: null });
+    const cleared = getWorkspaceContext();
+    assert(cleared.root === null && cleared.name === null, "workspace should clear");
+
+    const envCleared = await registry.execute("get_environment", {});
+    const clearedJson = JSON.parse(textOf(envCleared)) as {
+      workspace_root: string | null;
+      workspace_name: string | null;
+    };
+    assert(clearedJson.workspace_root === null, "workspace_root null after clear");
+    assert(clearedJson.workspace_name === null, "workspace_name null after clear");
+    console.log("✓ workspace relative paths");
   }
 
   // create_directory

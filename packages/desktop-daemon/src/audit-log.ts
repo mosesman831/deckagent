@@ -3,6 +3,7 @@ import {
   appendFileSync,
   existsSync,
   mkdirSync,
+  readFileSync,
   renameSync,
   statSync,
 } from "node:fs";
@@ -161,4 +162,38 @@ export function ensureAuditLogDir(logDir: string): void {
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
+}
+
+const DEFAULT_AUDIT_LIMIT = 100;
+const MAX_AUDIT_LIMIT = 500;
+
+/**
+ * Read the last N lines from audit.jsonl (default 100, max 500).
+ * Returns joined NDJSON text (no trailing newline if empty).
+ */
+export function readRecentAuditLog(options?: {
+  limit?: number;
+  logDir?: string;
+}): string {
+  let limit = options?.limit ?? DEFAULT_AUDIT_LIMIT;
+  if (!Number.isFinite(limit) || limit < 1) {
+    limit = DEFAULT_AUDIT_LIMIT;
+  }
+  limit = Math.min(Math.floor(limit), MAX_AUDIT_LIMIT);
+
+  const path = getAuditLogPath(options?.logDir);
+  if (!existsSync(path)) {
+    return "";
+  }
+
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf-8");
+  } catch {
+    return "";
+  }
+
+  const lines = raw.split("\n").filter((line) => line.trim().length > 0);
+  const slice = lines.slice(-limit);
+  return slice.join("\n");
 }

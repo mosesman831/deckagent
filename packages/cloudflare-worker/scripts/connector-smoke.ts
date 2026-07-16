@@ -232,7 +232,7 @@ async function runProfile(
     }
   }
 
-  // 5. resources/list
+  // 5. resources/list + resources/read
   {
     const step = "resources/list";
     try {
@@ -243,11 +243,108 @@ async function runProfile(
       });
       const resources = (json.result as { resources?: unknown[] })?.resources;
       const ok =
-        status === 200 && hasResult(json) && Array.isArray(resources);
+        status === 200 &&
+        hasResult(json) &&
+        Array.isArray(resources) &&
+        resources.length >= 5;
       results.push({
         step,
         ok,
-        detail: ok ? `${resources!.length} resources` : `status=${status}`,
+        detail: ok ? `${resources!.length} resources` : `status=${status} count=${resources?.length ?? "n/a"}`,
+      });
+    } catch (err) {
+      results.push({
+        step,
+        ok: false,
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  {
+    const step = "resources/read deckagent://about";
+    try {
+      const { status, json } = await mcpCall(url, token, {
+        id: id++,
+        method: "resources/read",
+        params: { uri: "deckagent://about" },
+      });
+      const contents = (json.result as { contents?: Array<{ text?: string }> })
+        ?.contents;
+      const text = contents?.[0]?.text ?? "";
+      const ok =
+        status === 200 &&
+        hasResult(json) &&
+        Array.isArray(contents) &&
+        text.includes("DeckAgent");
+      results.push({
+        step,
+        ok,
+        detail: ok ? undefined : `status=${status}`,
+      });
+    } catch (err) {
+      results.push({
+        step,
+        ok: false,
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  {
+    const step = "resources/read deckagent://session/instructions";
+    try {
+      const { status, json } = await mcpCall(url, token, {
+        id: id++,
+        method: "resources/read",
+        params: { uri: "deckagent://session/instructions" },
+      });
+      const contents = (json.result as { contents?: Array<{ text?: string }> })
+        ?.contents;
+      const text = contents?.[0]?.text ?? "";
+      const ok =
+        status === 200 &&
+        hasResult(json) &&
+        Array.isArray(contents) &&
+        text.includes("DeckAgent");
+      results.push({
+        step,
+        ok,
+        detail: ok ? undefined : `status=${status}`,
+      });
+    } catch (err) {
+      results.push({
+        step,
+        ok: false,
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  {
+    const step = "resources/read deckagent://policy";
+    try {
+      const { status, json } = await mcpCall(url, token, {
+        id: id++,
+        method: "resources/read",
+        params: { uri: "deckagent://policy" },
+      });
+      // Requires online daemon — fail the matrix if DEVICE_OFFLINE (same as tools/call).
+      const contents = (json.result as { contents?: Array<{ text?: string }> })
+        ?.contents;
+      const text = contents?.[0]?.text ?? "";
+      const ok =
+        status === 200 &&
+        hasResult(json) &&
+        Array.isArray(contents) &&
+        contents.length > 0 &&
+        text.length > 0;
+      results.push({
+        step,
+        ok,
+        detail: ok
+          ? undefined
+          : `status=${status} ${(json.error as { message?: string; data?: { code?: string } })?.data?.code ?? (json.error as { message?: string })?.message ?? JSON.stringify(json).slice(0, 160)}`,
       });
     } catch (err) {
       results.push({
@@ -293,16 +390,16 @@ async function runProfile(
     }
   }
 
-  // 7. tools/call list_directory /tmp
+  // 7. tools/call list_directory "." (workspace-relative; avoids outside-workspace confirmation)
   {
-    const step = "tools/call list_directory /tmp";
+    const step = 'tools/call list_directory "."';
     try {
       const { status, json } = await mcpCall(url, token, {
         id: id++,
         method: "tools/call",
         params: {
           name: "list_directory",
-          arguments: { path: "/tmp" },
+          arguments: { path: "." },
         },
       });
       const result = json.result as

@@ -2,6 +2,7 @@ import WebSocket from "ws";
 import type { Config } from "./config.js";
 import type { Logger } from "./logger.js";
 import type { ToolExecutor } from "./tool-executor.js";
+import { readLocalResource } from "./resources.js";
 import { DAEMON_VERSION, PROTOCOL_VERSION } from "./version.js";
 
 interface ExecuteToolMessage {
@@ -9,6 +10,13 @@ interface ExecuteToolMessage {
   id: string;
   tool: string;
   args: Record<string, unknown>;
+}
+
+interface ReadResourceMessage {
+  type: "read_resource";
+  id: string;
+  uri: string;
+  args?: Record<string, unknown>;
 }
 
 export type ConnectionState =
@@ -177,6 +185,15 @@ export class TunnelClient {
             `Unhandled execute_tool error: ${humanError(err)}`,
           );
         });
+        break;
+      }
+      case "read_resource": {
+        const parsed = parseReadResource(msg);
+        if (!parsed) {
+          this.logger.warn("Received malformed read_resource message");
+          return;
+        }
+        this.handleReadResource(parsed);
         break;
       }
       default:
@@ -356,6 +373,32 @@ export class TunnelClient {
       },
     });
   }
+
+  private handleReadResource(msg: ReadResourceMessage): void {
+    const result = readLocalResource(msg.uri, msg.args, {
+      policy: this.executor.getPolicy(),
+      workspace: this.executor.getWorkspace() ?? this.config.workspace,
+      auditLogDir: this.executor.getAuditLogDir(),
+    });
+
+    if (result.ok) {
+      this.send({
+        type: "resource_result",
+        id: msg.id,
+        contents: result.contents,
+      });
+      return;
+    }
+
+    this.send({
+      type: "resource_error",
+      id: msg.id,
+      error: {
+        code: result.code,
+        message: result.message,
+      },
+    });
+  }
 }
 
 function humanError(err: unknown): string {
@@ -380,4 +423,22 @@ function parseExecuteTool(
     };
   }
   return null;
+}
+
+function parseReadResource(
+  msg: Record<string, unknown>,
+): ReadResourceMessage | null {
+  if (typeof msg.id !== "string" || typeof msg.uri !== "string") {
+    return null;
+  }
+  const args =
+    msg.args !== null && typeof msg.args === "object"
+      ? (msg.args as Record<string, unknown>)
+      : undefined;
+  return {
+    type: "read_resource",
+    id: msg.id,
+    uri: msg.uri,
+    args,
+  };
 }

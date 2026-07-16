@@ -261,3 +261,9 @@ export {
   setBrowserEnabled,
 };
 export { get_environment };
+export {
+  setWorkspaceContext,
+  getWorkspaceContext,
+  resolveToolPath,
+  type WorkspaceContext,
+} from "./workspace-context.js";

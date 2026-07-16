@@ -4,6 +4,12 @@ import fs from 'node:fs';
 import readline from 'node:readline';
 import { z } from 'zod';
 
+export const WorkspaceSchema = z.object({
+  root: z.string().min(1),
+  name: z.string().min(1),
+  allow_outside_with_confirmation: z.boolean().default(true)
+});
+
 export const ConfigSchema = z.object({
   device_id: z.string().uuid(),
   token: z.string().min(32),
@@ -13,7 +19,9 @@ export const ConfigSchema = z.object({
   heartbeat_interval: z.number().int().default(15),
   tool_timeout: z.number().int().default(60),
   auto_connect: z.boolean().default(true),
-  log_level: z.enum(['debug', 'info', 'warn', 'error']).default('info')
+  log_level: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+  // Optional project scope (Wave 3 F1). Must be preserved on read/write.
+  workspace: WorkspaceSchema.optional()
 });
 
 export const DEFAULT_REQUIRE_CONFIRMATION = [
@@ -52,6 +60,7 @@ export const PolicySchema = z.object({
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
+export type Workspace = z.infer<typeof WorkspaceSchema>;
 export type Policy = z.infer<typeof PolicySchema>;
 
 export function getConfigDir(): string {
@@ -144,10 +153,20 @@ function writeSecureJson(filePath: string, data: unknown): void {
   }
 }
 
-export function writeConfigFiles(config: Config, policy: Policy): void {
+export function writeConfig(config: Config): void {
   ensureConfigDir();
-  writeSecureJson(getConfigPath(), config);
-  writeSecureJson(getPolicyPath(), policy);
+  // Parse through schema so optional workspace is preserved (or stripped when cleared).
+  writeSecureJson(getConfigPath(), ConfigSchema.parse(config));
+}
+
+export function writePolicy(policy: Policy): void {
+  ensureConfigDir();
+  writeSecureJson(getPolicyPath(), PolicySchema.parse(policy));
+}
+
+export function writeConfigFiles(config: Config, policy: Policy): void {
+  writeConfig(config);
+  writePolicy(policy);
 }
 
 export function readConfig(): Config {

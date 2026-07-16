@@ -2,6 +2,7 @@ import { createServer, type Server as HttpServer } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 import type { Logger } from "./logger.js";
 import type { ToolExecutor } from "./tool-executor.js";
+import { readLocalResource } from "./resources.js";
 
 export const LOCAL_WS_HOST = "127.0.0.1";
 export const LOCAL_WS_PORT = 9147;
@@ -11,6 +12,13 @@ interface ExecuteToolMessage {
   id: string;
   tool: string;
   args: Record<string, unknown>;
+}
+
+interface ReadResourceMessage {
+  type: "read_resource";
+  id: string;
+  uri: string;
+  args?: Record<string, unknown>;
 }
 
 /**
@@ -158,6 +166,12 @@ export class LocalTunnelServer {
       return;
     }
 
+    const resource = coerceReadResource(msg);
+    if (resource) {
+      this.handleReadResource(ws, resource);
+      return;
+    }
+
     if (msg.type === "ping" || msg.method === "ping") {
       this.send(ws, { type: "pong", timestamp: Date.now() });
       return;
@@ -217,6 +231,32 @@ export class LocalTunnelServer {
       error: {
         code: outcome.code,
         message: outcome.message,
+      },
+    });
+  }
+
+  private handleReadResource(ws: WebSocket, msg: ReadResourceMessage): void {
+    const result = readLocalResource(msg.uri, msg.args, {
+      policy: this.executor.getPolicy(),
+      workspace: this.executor.getWorkspace(),
+      auditLogDir: this.executor.getAuditLogDir(),
+    });
+
+    if (result.ok) {
+      this.send(ws, {
+        type: "resource_result",
+        id: msg.id,
+        contents: result.contents,
+      });
+      return;
+    }
+
+    this.send(ws, {
+      type: "resource_error",
+      id: msg.id,
+      error: {
+        code: result.code,
+        message: result.message,
       },
     });
   }
@@ -285,6 +325,43 @@ function coerceExecuteTool(
           : `local-${Date.now()}`;
       return { type: "execute_tool", id, tool, args };
     }
+  }
+
+  return null;
+}
+
+function coerceReadResource(
+  msg: Record<string, unknown>,
+): ReadResourceMessage | null {
+  if (
+    msg.type === "read_resource" &&
+    typeof msg.id === "string" &&
+    typeof msg.uri === "string"
+  ) {
+    const args =
+      msg.args !== null && typeof msg.args === "object"
+        ? (msg.args as Record<string, unknown>)
+        : undefined;
+    return { type: "read_resource", id: msg.id, uri: msg.uri, args };
+  }
+
+  // JSON-RPC style: { method: "read_resource", params: { uri, args? }, id }
+  if (
+    msg.method === "read_resource" &&
+    msg.params !== null &&
+    typeof msg.params === "object"
+  ) {
+    const params = msg.params as Record<string, unknown>;
+    if (typeof params.uri !== "string") return null;
+    const args =
+      params.args !== null && typeof params.args === "object"
+        ? (params.args as Record<string, unknown>)
+        : undefined;
+    const id =
+      typeof msg.id === "string" || typeof msg.id === "number"
+        ? String(msg.id)
+        : `local-res-${Date.now()}`;
+    return { type: "read_resource", id, uri: params.uri, args };
   }
 
   return null;

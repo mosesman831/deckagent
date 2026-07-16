@@ -74,6 +74,25 @@ function taskFocusText(task?: string): string {
   return `${DECKAGENT_SYSTEM_TEXT}${focus}`;
 }
 
+const DECKAGENT_WORKSPACE_TEXT = `# DeckAgent Workspace Rules
+
+DeckAgent scopes agent work to an **active workspace** (project root) when configured via \`deckagent workspace use <path>\`.
+
+## How to discover the workspace
+1. Call \`get_environment\` — look for \`workspace_root\` and \`workspace_name\`.
+2. Or read the MCP resource \`deckagent://workspace\` (JSON from the daemon).
+3. If neither is set, there is no active workspace: prefer asking the user for a project path, or use \`list_directory\` under allowed paths only.
+
+## Path rules
+- Prefer **relative paths** resolved against \`workspace_root\` (e.g. \`src/index.ts\`).
+- Absolute paths outside the workspace may be denied (\`ACCESS_DENIED\`) or require confirmation, depending on daemon config (\`allow_outside_with_confirmation\`).
+- Effective allowlist is the intersection of policy \`allowed_directories\` and the workspace root.
+
+## Workflow
+1. Confirm workspace via \`get_environment\` or \`deckagent://workspace\`.
+2. Orient with \`list_directory\` / \`search_files\` inside the workspace.
+3. Read before write; keep edits inside the project unless the user explicitly expands scope.`;
+
 export const PROMPT_CATALOG: McpPromptSummary[] = [
   {
     name: "deckagent_system",
@@ -91,6 +110,11 @@ export const PROMPT_CATALOG: McpPromptSummary[] = [
     name: "deckagent_safe_explore",
     description:
       "Read-only exploration mode: list/search/read only; avoid writes and shell mutations.",
+  },
+  {
+    name: "deckagent_workspace",
+    description:
+      "Workspace / project-scope rules: how to discover root and stay inside it.",
   },
 ];
 
@@ -132,6 +156,18 @@ export function getPromptMessages(
               "edit_file, move_file, execute_command, kill_process unless the user " +
               "explicitly asks.",
           },
+        },
+      ],
+    };
+  }
+
+  if (name === "deckagent_workspace") {
+    return {
+      description: "DeckAgent workspace / project-scope rules",
+      messages: [
+        {
+          role: "user",
+          content: { type: "text", text: DECKAGENT_WORKSPACE_TEXT },
         },
       ],
     };

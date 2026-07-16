@@ -1,6 +1,4 @@
 import { spawn, type ChildProcess } from "child_process";
-import os from "os";
-import path from "path";
 import {
   ExecuteCommandArgsSchema,
   ExecuteCommandStreamArgsSchema,
@@ -12,16 +10,10 @@ import {
   type KillProcessArgs,
   type ToolResponse,
 } from "../schemas.js";
+import { resolveToolPath } from "../workspace-context.js";
 
 const activeChildren = new Set<ChildProcess>();
 const SIGKILL_DELAY_MS = 500;
-
-function expandHome(input: string): string {
-  if (input === "~" || input.startsWith("~/")) {
-    return path.join(os.homedir(), input.slice(1));
-  }
-  return input;
-}
 
 function humanError(err: unknown, fallback: string): string {
   if (err instanceof Error) return err.message;
@@ -128,7 +120,7 @@ function runShellCommand(
 
 export async function execute_command(args: ExecuteCommandArgs): Promise<ToolResponse> {
   const parsed = ExecuteCommandArgsSchema.parse(args);
-  const workdir = parsed.workdir ? expandHome(parsed.workdir) : process.cwd();
+  const workdir = parsed.workdir ? resolveToolPath(parsed.workdir) : process.cwd();
   const timeoutMs = parsed.timeout * 1000;
 
   try {
@@ -176,7 +168,7 @@ export async function execute_command_stream(
   onChunk?: (chunk: string) => void,
 ): Promise<ToolResponse> {
   const parsed = ExecuteCommandStreamArgsSchema.parse(args);
-  const workdir = parsed.workdir ? expandHome(parsed.workdir) : process.cwd();
+  const workdir = parsed.workdir ? resolveToolPath(parsed.workdir) : process.cwd();
 
   try {
     const result = await runShellCommand(parsed.command, {

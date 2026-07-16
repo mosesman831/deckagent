@@ -1,6 +1,5 @@
 import fs from "fs/promises";
 import path from "path";
-import os from "os";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import {
@@ -24,6 +23,7 @@ import {
   type ReadMultipleFilesArgs,
   type ToolResponse,
 } from "../schemas.js";
+import { resolveToolPath } from "../workspace-context.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -39,13 +39,6 @@ export function setMaxFileReadSize(bytes: number): void {
 
 export function getMaxFileReadSize(): number {
   return maxFileReadSize;
-}
-
-function expandHome(input: string): string {
-  if (input === "~" || input.startsWith("~/")) {
-    return path.join(os.homedir(), input.slice(1));
-  }
-  return input;
 }
 
 function humanError(err: unknown, fallback: string): string {
@@ -71,7 +64,7 @@ async function isBinary(filePath: string): Promise<boolean> {
 
 export async function read_file(args: ReadFileArgs): Promise<ToolResponse> {
   const parsed = ReadFileArgsSchema.parse(args);
-  const filePath = expandHome(parsed.path);
+  const filePath = resolveToolPath(parsed.path);
 
   try {
     const stat = await fs.stat(filePath);
@@ -121,7 +114,7 @@ export async function read_file(args: ReadFileArgs): Promise<ToolResponse> {
 
 export async function write_file(args: WriteFileArgs): Promise<ToolResponse> {
   const parsed = WriteFileArgsSchema.parse(args);
-  const filePath = expandHome(parsed.path);
+  const filePath = resolveToolPath(parsed.path);
 
   try {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -141,7 +134,7 @@ export async function write_file(args: WriteFileArgs): Promise<ToolResponse> {
 
 export async function edit_file(args: EditFileArgs): Promise<ToolResponse> {
   const parsed = EditFileArgsSchema.parse(args);
-  const filePath = expandHome(parsed.path);
+  const filePath = resolveToolPath(parsed.path);
 
   try {
     const content = await fs.readFile(filePath, "utf-8");
@@ -192,7 +185,7 @@ export async function edit_file(args: EditFileArgs): Promise<ToolResponse> {
 
 export async function search_files(args: SearchFilesArgs): Promise<ToolResponse> {
   const parsed = SearchFilesArgsSchema.parse(args);
-  const searchPath = expandHome(parsed.path);
+  const searchPath = resolveToolPath(parsed.path);
 
   try {
     let output = "";
@@ -266,7 +259,7 @@ async function fallbackSearch(
 
 export async function list_directory(args: ListDirectoryArgs): Promise<ToolResponse> {
   const parsed = ListDirectoryArgsSchema.parse(args);
-  const dirPath = expandHome(parsed.path);
+  const dirPath = resolveToolPath(parsed.path);
 
   try {
     const entries = await fs.readdir(dirPath, { withFileTypes: true });
@@ -296,7 +289,7 @@ export async function list_directory(args: ListDirectoryArgs): Promise<ToolRespo
 
 export async function create_directory(args: CreateDirectoryArgs): Promise<ToolResponse> {
   const parsed = CreateDirectoryArgsSchema.parse(args);
-  const dirPath = expandHome(parsed.path);
+  const dirPath = resolveToolPath(parsed.path);
 
   try {
     await fs.mkdir(dirPath, { recursive: true });
@@ -313,8 +306,8 @@ export async function create_directory(args: CreateDirectoryArgs): Promise<ToolR
 
 export async function move_file(args: MoveFileArgs): Promise<ToolResponse> {
   const parsed = MoveFileArgsSchema.parse(args);
-  const source = expandHome(parsed.source);
-  const destination = expandHome(parsed.destination);
+  const source = resolveToolPath(parsed.source);
+  const destination = resolveToolPath(parsed.destination);
 
   try {
     await fs.mkdir(path.dirname(destination), { recursive: true });
@@ -332,7 +325,7 @@ export async function move_file(args: MoveFileArgs): Promise<ToolResponse> {
 
 export async function get_file_info(args: GetFileInfoArgs): Promise<ToolResponse> {
   const parsed = GetFileInfoArgsSchema.parse(args);
-  const filePath = expandHome(parsed.path);
+  const filePath = resolveToolPath(parsed.path);
 
   try {
     const stat = await fs.stat(filePath);

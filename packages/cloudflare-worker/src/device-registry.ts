@@ -98,6 +98,12 @@ export async function listOnlineDevices(env: Env): Promise<string[]> {
   return listed.keys.map((k) => k.name.slice(DEVICE_ONLINE_PREFIX.length));
 }
 
+/** List all registered device IDs (online or offline). */
+export async function listRegisteredDeviceIds(env: Env): Promise<string[]> {
+  const listed = await env.DECK_KV.list({ prefix: DEVICE_PREFIX });
+  return listed.keys.map((k) => k.name.slice(DEVICE_PREFIX.length));
+}
+
 /**
  * Resolve which device should handle a tools/call.
  * - Explicit deviceId: use it (must be online).
