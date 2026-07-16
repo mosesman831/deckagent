@@ -310,4 +310,5 @@ MIT — see [LICENSE](LICENSE).
 
 ## Roadmap
 
-Next feature wave (workspaces, MCP resources, snapshots/undo, secrets vault, control UI, budgets) is specified in [`docs/WAVE3_FEATURE_SPEC.md`](docs/WAVE3_FEATURE_SPEC.md).
+- Next product wave (workspaces, resources, snapshots, secrets, UI, budgets, SSE): [`docs/WAVE3_FEATURE_SPEC.md`](docs/WAVE3_FEATURE_SPEC.md)
+- Hard security enforcement wave (profiles, trusted/denied/protected paths, tools/list filtering): [`docs/SECURITY_ENFORCEMENT_SPEC.md`](docs/SECURITY_ENFORCEMENT_SPEC.md)
