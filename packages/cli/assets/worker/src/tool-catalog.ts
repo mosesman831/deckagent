@@ -42,7 +42,7 @@ export const TOOL_CATALOG: McpToolDefinition[] = [
   {
     name: "write_file",
     description:
-      "Write content to a file, creating it if it doesn't exist. OVERWRITES existing content. Use edit_file for surgical changes.",
+      "Write complete file content, creating the file if needed and overwriting any existing content. Prefer edit_file for small or surgical changes; mutating writes may require confirmation and show a diff.",
     inputSchema: {
       type: "object",
       properties: {
@@ -54,7 +54,8 @@ export const TOOL_CATALOG: McpToolDefinition[] = [
   },
   {
     name: "edit_file",
-    description: "Surgical find-and-replace edit on a file. Replaces exact string match.",
+    description:
+      "Make a surgical exact-string replacement in an existing file. Use this instead of write_file for targeted edits so confirmations can present a focused diff.",
     inputSchema: {
       type: "object",
       properties: {
@@ -83,7 +84,8 @@ export const TOOL_CATALOG: McpToolDefinition[] = [
   },
   {
     name: "list_directory",
-    description: "List files and directories in a path with metadata.",
+    description:
+      'List files and directories with metadata. In a configured workspace, use "." to list the workspace root and prefer relative paths under it.',
     inputSchema: {
       type: "object",
       properties: { path: { type: "string" } },
@@ -134,7 +136,8 @@ export const TOOL_CATALOG: McpToolDefinition[] = [
   },
   {
     name: "execute_command",
-    description: "Execute a shell command and return its output.",
+    description:
+      "Run a short, bounded shell command and return buffered output when it completes. Use execute_command_stream for live output and start_job for long-running commands.",
     inputSchema: {
       type: "object",
       properties: {
@@ -154,7 +157,8 @@ export const TOOL_CATALOG: McpToolDefinition[] = [
   },
   {
     name: "execute_command_stream",
-    description: "Execute a command and stream output back in real-time.",
+    description:
+      "Run a command when live stdout/stderr matters and the MCP client accepts text/event-stream. Use execute_command for short buffered commands; use start_job for long-running or background work.",
     inputSchema: {
       type: "object",
       properties: {
@@ -193,7 +197,7 @@ export const TOOL_CATALOG: McpToolDefinition[] = [
   {
     name: "start_job",
     description:
-      "Start a tracked background shell job and return immediately with a job id. Requires confirmation by default.",
+      "Start a tracked background shell job and return immediately with a job id. Use for long-running commands, servers, or watchers, then poll with get_job. Requires confirmation by default.",
     inputSchema: {
       type: "object",
       properties: {
@@ -264,7 +268,7 @@ export const TOOL_CATALOG: McpToolDefinition[] = [
   {
     name: "browser_navigate",
     description:
-      "Open a URL in the browser. Requires browser automation to be enabled.",
+      "Open a URL in the browser. Requires browser automation to be enabled; daemon host policy may deny unapproved hosts.",
     inputSchema: {
       type: "object",
       properties: {
@@ -276,7 +280,8 @@ export const TOOL_CATALOG: McpToolDefinition[] = [
   },
   {
     name: "browser_screenshot",
-    description: "Take a screenshot of the current browser page.",
+    description:
+      "Take a screenshot of the current browser page when browser automation is enabled; host policy may deny pages outside the allowed set.",
     inputSchema: {
       type: "object",
       properties: { full_page: { type: "boolean", default: false } },
@@ -284,7 +289,8 @@ export const TOOL_CATALOG: McpToolDefinition[] = [
   },
   {
     name: "browser_click",
-    description: "Click an element on the page by selector.",
+    description:
+      "Click an element on the current browser page by selector. Browser automation and host policy must allow the page.",
     inputSchema: {
       type: "object",
       properties: { selector: { type: "string" } },
@@ -293,7 +299,8 @@ export const TOOL_CATALOG: McpToolDefinition[] = [
   },
   {
     name: "browser_evaluate",
-    description: "Run JavaScript code in the browser page context.",
+    description:
+      "Run JavaScript in the current browser page context. Browser automation and host policy must allow the page; keep evaluations narrowly scoped.",
     inputSchema: {
       type: "object",
       properties: { code: { type: "string" } },

@@ -242,7 +242,17 @@ async function main() {
     new Request(url("/mcp"), { method: "GET" }),
     env
   );
+  const unauthBody = (await unauthRes.json()) as {
+    code?: string;
+    message?: string;
+    hint?: string;
+  };
   assert(unauthRes.status === 401, `unauthenticated /mcp → 401 (got ${unauthRes.status})`);
+  assert(
+    unauthBody.code === "UNAUTHORIZED" &&
+      unauthBody.hint?.includes("Authorization: Bearer <API_TOKEN>") === true,
+    "unauthenticated /mcp body has code and auth hint"
+  );
 
   const badAuthRes = await worker.fetch(
     new Request(url("/mcp"), {
@@ -251,7 +261,16 @@ async function main() {
     }),
     env
   );
+  const badAuthBody = (await badAuthRes.json()) as {
+    code?: string;
+    hint?: string;
+  };
   assert(badAuthRes.status === 401, `bad bearer → 401 (got ${badAuthRes.status})`);
+  assert(
+    badAuthBody.code === "UNAUTHORIZED" &&
+      badAuthBody.hint?.includes("Authorization: Bearer <API_TOKEN>") === true,
+    "bad bearer body has code and auth hint"
+  );
 
   const unauthMetricsRes = await worker.fetch(
     new Request(url("/metrics"), { method: "GET" }),
@@ -396,10 +415,51 @@ async function main() {
   assert(TOOL_NAMES.has("start_job"), "has start_job");
   assert(TOOL_NAMES.has("get_job"), "has get_job");
   assert(TOOL_NAMES.has("cancel_job"), "has cancel_job");
+  const writeFile = TOOL_CATALOG.find((t) => t.name === "write_file");
+  const editFile = TOOL_CATALOG.find((t) => t.name === "edit_file");
+  const listDirectory = TOOL_CATALOG.find((t) => t.name === "list_directory");
   const execCmd = TOOL_CATALOG.find((t) => t.name === "execute_command");
   const execStream = TOOL_CATALOG.find((t) => t.name === "execute_command_stream");
   const startJob = TOOL_CATALOG.find((t) => t.name === "start_job");
   const getJob = TOOL_CATALOG.find((t) => t.name === "get_job");
+  const browserNavigate = TOOL_CATALOG.find((t) => t.name === "browser_navigate");
+  assert(
+    writeFile?.description.includes("Prefer edit_file") === true &&
+      writeFile.description.includes("confirmation") &&
+      writeFile.description.includes("diff"),
+    "write_file description guides surgical edits and confirmations"
+  );
+  assert(
+    editFile?.description.includes("surgical") === true &&
+      editFile.description.includes("focused diff"),
+    "edit_file description explains targeted diffs"
+  );
+  assert(
+    listDirectory?.description.includes('"."') === true &&
+      listDirectory.description.includes("workspace root"),
+    'list_directory description recommends "." for workspace root'
+  );
+  assert(
+    execCmd?.description.includes("short") === true &&
+      execCmd.description.includes("execute_command_stream") &&
+      execCmd.description.includes("start_job"),
+    "execute_command description distinguishes stream and jobs"
+  );
+  assert(
+    execStream?.description.includes("live stdout/stderr") === true &&
+      execStream.description.includes("text/event-stream") &&
+      execStream.description.includes("start_job"),
+    "execute_command_stream description explains live streaming"
+  );
+  assert(
+    startJob?.description.includes("long-running") === true &&
+      startJob.description.includes("get_job"),
+    "start_job description points to get_job for long-running commands"
+  );
+  assert(
+    browserNavigate?.description.includes("host policy") === true,
+    "browser tool description mentions host policy"
+  );
   const execProps = (execCmd?.inputSchema as { properties?: Record<string, unknown> })
     ?.properties;
   const streamProps = (
@@ -747,6 +807,17 @@ async function main() {
     "initialize includes DeckAgent instructions"
   );
   assert(
+    initBody.result?.instructions?.includes("DEVICE_OFFLINE") === true &&
+      initBody.result.instructions.includes("deckagent doctor") &&
+      initBody.result.instructions.includes("DEVICE_AMBIGUOUS") &&
+      initBody.result.instructions.includes("list_devices") &&
+      initBody.result.instructions.includes("CONFIRMATION_REQUIRED") &&
+      initBody.result.instructions.includes("loopback UI") &&
+      initBody.result.instructions.includes("start_job then get_job") &&
+      initBody.result.instructions.includes('list_directory "."'),
+    "initialize instructions include W6.4 recovery guidance"
+  );
+  assert(
     initBody.result?.capabilities?.prompts !== undefined,
     "initialize advertises prompts capability"
   );
@@ -816,6 +887,17 @@ async function main() {
   const promptText = promptGetBody.result?.messages?.[0]?.content?.text ?? "";
   assert(promptText.includes("DeckAgent"), "prompts/get returns identity text");
   assert(promptText.includes("list files in /tmp"), "prompts/get includes task arg");
+  assert(
+    promptText.includes("DEVICE_OFFLINE") &&
+      promptText.includes("deckagent doctor") &&
+      promptText.includes("DEVICE_AMBIGUOUS") &&
+      promptText.includes("list_devices") &&
+      promptText.includes("start_job") &&
+      promptText.includes("get_job") &&
+      promptText.includes("workspace_root") &&
+      promptText.includes("host policy"),
+    "prompts/get includes recovery, jobs, workspace, and browser policy guidance"
+  );
 
   const resourcesRes = await worker.fetch(
     new Request(url("/mcp"), {
@@ -1263,8 +1345,28 @@ async function main() {
     new Request(url("/health"), { method: "GET" }),
     env
   );
-  const health = (await healthRes.json()) as { status?: string };
+  const health = (await healthRes.json()) as {
+    status?: string;
+    worker_version?: string;
+    min_protocol_version?: number;
+    started_at?: string;
+    uptime_ms?: number;
+    app_name?: string;
+  };
   assert(health.status === "ok", "health ok");
+  assert(
+    health.worker_version === WORKER_VERSION &&
+      health.min_protocol_version === MIN_PROTOCOL_VERSION &&
+      health.app_name === "DeckAgent",
+    "health includes worker version, min protocol version, and app name"
+  );
+  assert(
+    typeof health.started_at === "string" &&
+      !Number.isNaN(Date.parse(health.started_at)) &&
+      typeof health.uptime_ms === "number" &&
+      health.uptime_ms >= 0,
+    "health includes started_at ISO timestamp and uptime_ms"
+  );
 
   // Direct setDevice + status (unit path)
   console.log("\n9. Direct registry helpers");
@@ -1447,6 +1549,8 @@ async function main() {
   const rateMcpBody = (await rateMcp3.json()) as {
     code?: string;
     message?: string;
+    hint?: string;
+    retry_after_seconds?: number;
   };
   assert(
     rateMcp1.status === 200 && rateMcp2.status === 200,
@@ -1455,6 +1559,13 @@ async function main() {
   assert(
     rateMcp3.status === 429 && rateMcpBody.code === "RATE_LIMITED",
     "third /mcp request over low test limit → 429 RATE_LIMITED"
+  );
+  assert(
+    rateMcp3.headers.get("Retry-After") === String(rateMcpBody.retry_after_seconds) &&
+      typeof rateMcpBody.retry_after_seconds === "number" &&
+      rateMcpBody.retry_after_seconds > 0 &&
+      rateMcpBody.hint?.includes("Wait and retry") === true,
+    "rate limit response includes retry_after_seconds, hint, and Retry-After header"
   );
   assert(
     rateMcpBody.message?.includes("2 requests per minute") === true,
@@ -1491,6 +1602,7 @@ async function main() {
   );
   const rateDevicesBody = (await rateDevices3.json()) as {
     code?: string;
+    retry_after_seconds?: number;
   };
   assert(
     rateDevices1.status === 200 && rateDevices2.status === 200,
@@ -1499,6 +1611,11 @@ async function main() {
   assert(
     rateDevices3.status === 429 && rateDevicesBody.code === "RATE_LIMITED",
     "third /api/devices request over low test limit → 429 RATE_LIMITED"
+  );
+  assert(
+    rateDevices3.headers.get("Retry-After") ===
+      String(rateDevicesBody.retry_after_seconds),
+    "/api/devices 429 includes Retry-After header"
   );
 
   console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);

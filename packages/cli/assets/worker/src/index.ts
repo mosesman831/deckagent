@@ -18,6 +18,7 @@ import {
   DEFAULT_MCP_RATE_LIMIT_PER_MINUTE,
   RATE_LIMIT_WINDOW_MS,
 } from "./rate-limit.js";
+import { MIN_PROTOCOL_VERSION, WORKER_VERSION } from "./protocol.js";
 
 export { TunnelDO } from "./tunnel-do.js";
 
@@ -112,6 +113,17 @@ function getWorkerMetricsSnapshot(): Record<string, unknown> {
   };
 }
 
+function getWorkerHealthSnapshot(env: Env): Record<string, unknown> {
+  return {
+    status: "ok",
+    worker_version: WORKER_VERSION,
+    min_protocol_version: MIN_PROTOCOL_VERSION,
+    started_at: new Date(startTime).toISOString(),
+    uptime_ms: Date.now() - startTime,
+    app_name: env.APP_NAME || "DeckAgent",
+  };
+}
+
 function errorResponse(
   status: number,
   code: string,
@@ -124,11 +136,41 @@ function errorResponse(
   });
 }
 
-function rateLimitedResponse(message: string, cors: Record<string, string>): Response {
-  return new Response(JSON.stringify({ code: "RATE_LIMITED", message }), {
-    status: 429,
-    headers: { "Content-Type": "application/json", ...cors },
-  });
+function unauthorizedResponse(message: string, cors: Record<string, string>): Response {
+  return new Response(
+    JSON.stringify({
+      code: "UNAUTHORIZED",
+      message,
+      hint: "Set Authorization: Bearer <API_TOKEN>",
+    }),
+    {
+      status: 401,
+      headers: { "Content-Type": "application/json", ...cors },
+    }
+  );
+}
+
+function rateLimitedResponse(
+  message: string,
+  retryAfterSeconds: number,
+  cors: Record<string, string>
+): Response {
+  return new Response(
+    JSON.stringify({
+      code: "RATE_LIMITED",
+      message,
+      hint: "Wait and retry after the Retry-After interval",
+      retry_after_seconds: retryAfterSeconds,
+    }),
+    {
+      status: 429,
+      headers: {
+        "Content-Type": "application/json",
+        "Retry-After": String(retryAfterSeconds),
+        ...cors,
+      },
+    }
+  );
 }
 
 function formatZodError(prefix: string, error: z.ZodError): string {
@@ -196,6 +238,7 @@ function enforceRateLimit(
   const route = scope === "mcp" ? "/mcp" : "/api/devices";
   return rateLimitedResponse(
     `Rate limit exceeded for ${route}: ${limit} requests per minute. Try again in ${result.retryAfterSeconds} seconds.`,
+    result.retryAfterSeconds,
     cors
   );
 }
@@ -207,22 +250,12 @@ async function requireApiToken(
 ): Promise<Response | { tokenHash: string }> {
   const auth = request.headers.get("Authorization");
   if (!auth || !auth.startsWith("Bearer ")) {
-    return errorResponse(
-      401,
-      "UNAUTHORIZED",
-      "Invalid or missing API token",
-      cors
-    );
+    return unauthorizedResponse("Invalid or missing API token", cors);
   }
   const token = auth.slice("Bearer ".length).trim();
   const ok = await verifyApiToken(token, env);
   if (!ok) {
-    return errorResponse(
-      401,
-      "UNAUTHORIZED",
-      "Invalid or missing API token",
-      cors
-    );
+    return unauthorizedResponse("Invalid or missing API token", cors);
   }
   return { tokenHash: await hashToken(token) };
 }
@@ -239,14 +272,7 @@ export default {
 
     try {
       if (url.pathname === "/health") {
-        return jsonResponse(
-          {
-            status: "ok",
-            uptime: Date.now() - startTime,
-          },
-          200,
-          cors
-        );
+        return jsonResponse(getWorkerHealthSnapshot(env), 200, cors);
       }
 
       if (url.pathname === "/metrics") {
