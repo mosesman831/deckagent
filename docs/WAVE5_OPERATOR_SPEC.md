@@ -197,6 +197,8 @@ Extend `notify.ts` usage:
 
 If wrangler unavailable: skip with clear message exit 0 **only in CI skip mode** via `DECKAGENT_E2E_SKIP=1`; otherwise fail. Prefer actually running in this agent environment.
 
+**Acceptance note (2026-07-16):** `npm run e2e:mcp` passed locally with Wrangler 4.111.0. Evidence: `/health` 200, device registration 200, daemon tunnel online, MCP `initialize`, `tools/list` (21 tools), `resources/list` (6 resources), `resources/read deckagent://devices`, `tools/call get_environment`, `tools/call list_directory "."`, `tools/call start_job`, and `tools/call get_job` all passed.
+
 ---
 
 ## 3. Implementation waves (parallel subagents)
@@ -255,7 +257,7 @@ curl -sS -X POST "$BASE/mcp" \
 - [ ] `start_job` / `get_job` / `cancel_job` work end-to-end
 - [ ] plugin integrity mismatch refused under strict
 - [ ] disconnect/budget alerts invoked (unit-covered)
-- [ ] `npm run e2e:mcp` green (or documented skip only if wrangler missing)
+- [x] `npm run e2e:mcp` green (2026-07-16 local run; see W5.8 acceptance note)
 - [ ] All package tests + security:smoke + pack:smoke green
 
 ---

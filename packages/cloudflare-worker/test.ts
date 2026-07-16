@@ -1,8 +1,9 @@
 import type { Env } from "./src/types.js";
-import worker, {
+import worker from "./src/index.js";
+import {
   DEFAULT_DEVICE_API_RATE_LIMIT_PER_MINUTE,
   DEFAULT_MCP_RATE_LIMIT_PER_MINUTE,
-} from "./src/index.js";
+} from "./src/rate-limit.js";
 import {
   getDevice,
   setDevice,

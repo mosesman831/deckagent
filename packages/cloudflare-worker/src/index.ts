@@ -13,12 +13,13 @@ import {
   setPreferredDeviceId,
 } from "./device-registry.js";
 import { handleMcpRequest } from "./mcp-handler.js";
+import {
+  DEFAULT_DEVICE_API_RATE_LIMIT_PER_MINUTE,
+  DEFAULT_MCP_RATE_LIMIT_PER_MINUTE,
+  RATE_LIMIT_WINDOW_MS,
+} from "./rate-limit.js";
 
 export { TunnelDO } from "./tunnel-do.js";
-
-export const RATE_LIMIT_WINDOW_MS = 60_000;
-export const DEFAULT_MCP_RATE_LIMIT_PER_MINUTE = 120;
-export const DEFAULT_DEVICE_API_RATE_LIMIT_PER_MINUTE = 30;
 
 const startTime = Date.now();
 
