@@ -5,7 +5,15 @@ import {
   type ServerResponse,
 } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Logger } from "./logger.js";
@@ -34,6 +42,10 @@ export interface ControlUiStatus {
   online: boolean;
   connection_state: string;
   pending_approvals: number;
+  last_heartbeat_at?: string | null;
+  worker_version?: string | null;
+  protocol_warning?: string | null;
+  reconnecting?: boolean;
 }
 
 export interface ControlUiDeviceConfig {
@@ -41,6 +53,7 @@ export interface ControlUiDeviceConfig {
   device_name: string;
   worker_url: string;
   api_token?: string;
+  preferred_device_id?: string;
 }
 
 type FetchLike = (
@@ -68,6 +81,8 @@ export interface ControlUiOptions {
   unlockTokenDir?: string;
   /** Override ~/.deckagent for ui.token (tests). */
   uiTokenDir?: string;
+  /** Override ~/.deckagent/jobs (tests). */
+  jobsDir?: string;
 }
 
 /**
@@ -88,6 +103,7 @@ export class ControlUiServer {
   private auditLogDir?: string;
   private unlockTokenDir?: string;
   private uiTokenDir?: string;
+  private jobsDir?: string;
   private uiToken: string | null = null;
 
   constructor(options: ControlUiOptions) {
@@ -103,6 +119,7 @@ export class ControlUiServer {
     this.auditLogDir = options.auditLogDir;
     this.unlockTokenDir = options.unlockTokenDir;
     this.uiTokenDir = options.uiTokenDir;
+    this.jobsDir = options.jobsDir;
   }
 
   get baseUrl(): string {
@@ -182,6 +199,15 @@ export class ControlUiServer {
         return;
       }
 
+      if (method === "GET" && url.pathname === "/api/local/devices") {
+        const devices = await localDevicesPublic(
+          this.getDeviceConfig(),
+          this.fetchImpl,
+        );
+        sendJson(res, 200, devices);
+        return;
+      }
+
       if (method === "POST" && url.pathname === "/api/local/device/revoke") {
         if (!this.authorizeMutation(req, res)) return;
         const result = await revokeLocalDevice(
@@ -194,6 +220,19 @@ export class ControlUiServer {
 
       if (method === "GET" && url.pathname === "/api/approvals") {
         sendJson(res, 200, { pending: this.confirmationServer.listPending() });
+        return;
+      }
+
+      if (method === "GET" && url.pathname === "/api/jobs") {
+        const limitRaw = url.searchParams.get("limit");
+        const limit = limitRaw ? Number(limitRaw) : 20;
+        sendJson(res, 200, {
+          jobs: readRecentJobs({
+            jobsDir: this.jobsDir,
+            limit: Number.isFinite(limit) ? limit : 20,
+            tailLines: 40,
+          }),
+        });
         return;
       }
 
@@ -450,13 +489,204 @@ function localDevicePublic(
       device_id: null,
       device_name: null,
       worker_url: null,
+      preferred_device_id: null,
     };
   }
   return {
     device_id: config.device_id,
     device_name: config.device_name,
     worker_url: config.worker_url,
+    preferred_device_id: config.preferred_device_id ?? null,
   };
+}
+
+async function localDevicesPublic(
+  config: ControlUiDeviceConfig | null,
+  fetchImpl: FetchLike,
+): Promise<Record<string, unknown>> {
+  if (!config) {
+    return {
+      source: "local",
+      preferred_device_id: null,
+      devices: [],
+      local_device: null,
+      note: "No local device config found. Run `deckagent setup` first.",
+    };
+  }
+
+  const localDevice = localDevicePublic(config);
+  const localFallback = (note: string): Record<string, unknown> => ({
+    source: "local",
+    preferred_device_id: config.preferred_device_id ?? null,
+    devices: [
+      {
+        id: config.device_id,
+        device_id: config.device_id,
+        name: config.device_name,
+        status: "local-config",
+        worker_url: config.worker_url,
+      },
+    ],
+    local_device: localDevice,
+    note,
+  });
+
+  if (!config.api_token) {
+    return localFallback(
+      "Worker API token is missing from local config, so only the local device is shown.",
+    );
+  }
+
+  try {
+    const response = await fetchImpl(new URL("/api/devices", config.worker_url), {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${config.api_token}`,
+        Accept: "application/json",
+      },
+    });
+    let payload: unknown = {};
+    try {
+      payload = await response.json();
+    } catch {
+      if (!response.ok) {
+        return localFallback(
+          `Could not fetch Worker devices: Worker returned HTTP ${response.status}.`,
+        );
+      }
+    }
+    const body =
+      payload && typeof payload === "object" && !Array.isArray(payload)
+        ? (payload as Record<string, unknown>)
+        : {};
+    if (!response.ok) {
+      return localFallback(
+        `Could not fetch Worker devices: ${responseErrorMessage(response.status, body)}.`,
+      );
+    }
+    return {
+      ...body,
+      source: "worker",
+      preferred_device_id:
+        typeof body.preferred_device_id === "string" || body.preferred_device_id === null
+          ? body.preferred_device_id
+          : config.preferred_device_id ?? null,
+      local_device: localDevice,
+    };
+  } catch (err) {
+    return localFallback(
+      `Could not fetch Worker devices: ${err instanceof Error ? err.message : String(err)}.`,
+    );
+  }
+}
+
+interface JobPanelEntry {
+  id: string;
+  command: string;
+  cwd: string | null;
+  status: string;
+  started_at: string | null;
+  updated_at: string | null;
+  ended_at: string | null;
+  exit_code: number | null;
+  signal: string | null;
+  stdout_tail: string;
+  stderr_tail: string;
+  stdout_truncated: boolean;
+  stderr_truncated: boolean;
+  error: string | null;
+}
+
+function readRecentJobs(options: {
+  jobsDir?: string;
+  limit: number;
+  tailLines: number;
+}): JobPanelEntry[] {
+  const jobsDir = options.jobsDir ?? join(homedir(), ".deckagent", "jobs");
+  const limit = Math.max(1, Math.min(Math.floor(options.limit), 20));
+  if (!existsSync(jobsDir)) return [];
+
+  let entries: string[];
+  try {
+    entries = readdirSync(jobsDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+
+  return entries
+    .map((id) => readJobEntry(jobsDir, id, options.tailLines))
+    .filter((job): job is JobPanelEntry => job !== null)
+    .sort((a, b) => {
+      const aTime = Date.parse(a.started_at ?? a.updated_at ?? "");
+      const bTime = Date.parse(b.started_at ?? b.updated_at ?? "");
+      return (Number.isFinite(bTime) ? bTime : 0) - (Number.isFinite(aTime) ? aTime : 0);
+    })
+    .slice(0, limit);
+}
+
+function readJobEntry(
+  jobsDir: string,
+  directoryName: string,
+  tailLines: number,
+): JobPanelEntry | null {
+  const dir = join(jobsDir, directoryName);
+  let raw: string;
+  try {
+    raw = readFileSync(join(dir, "meta.json"), "utf-8");
+  } catch {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  const meta = parsed as Record<string, unknown>;
+  const id = stringValue(meta.id) ?? directoryName;
+  const stdoutPath = join(dir, "stdout.log");
+  const stderrPath = join(dir, "stderr.log");
+  return {
+    id,
+    command: stringValue(meta.command) ?? "(unknown command)",
+    cwd: stringValue(meta.cwd),
+    status: stringValue(meta.status) ?? "unknown",
+    started_at: stringValue(meta.started_at),
+    updated_at: stringValue(meta.updated_at),
+    ended_at: stringValue(meta.ended_at),
+    exit_code: numberOrNull(meta.exit_code),
+    signal: stringValue(meta.signal),
+    stdout_tail: readTailLines(stdoutPath, tailLines),
+    stderr_tail: readTailLines(stderrPath, tailLines),
+    stdout_truncated: meta.stdout_truncated === true,
+    stderr_truncated: meta.stderr_truncated === true,
+    error: stringValue(meta.error),
+  };
+}
+
+function readTailLines(path: string, lines: number): string {
+  try {
+    const stat = statSync(path);
+    if (!stat.isFile()) return "";
+    const raw = readFileSync(path, "utf-8");
+    return raw.split(/\r?\n/).slice(-lines).join("\n");
+  } catch {
+    return "";
+  }
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function numberOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 async function revokeLocalDevice(
@@ -640,6 +870,8 @@ function renderDashboard(): string {
       --accent: #3d9cf0;
       --ok: #3ecf8e;
       --deny: #e85d5d;
+      --warn: #d29922;
+      --code: #121820;
     }
     * { box-sizing: border-box; }
     body {
@@ -665,7 +897,7 @@ function renderDashboard(): string {
       grid-template-columns: 1fr 1fr;
       gap: 16px;
       padding: 20px 32px 40px;
-      max-width: 1100px;
+      max-width: 1200px;
     }
     @media (max-width: 800px) {
       main { grid-template-columns: 1fr; padding: 16px; }
@@ -686,6 +918,38 @@ function renderDashboard(): string {
     }
     .row { display: flex; justify-content: space-between; gap: 12px; margin: 8px 0; font-size: 0.95rem; }
     .row .label { color: var(--muted); }
+    .health-strip {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(120px, 1fr));
+      gap: 10px;
+      padding: 12px;
+      background: rgba(13, 17, 23, 0.55);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    @media (max-width: 800px) {
+      .health-strip { grid-template-columns: 1fr 1fr; }
+    }
+    .health-item {
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: #111923;
+      min-width: 0;
+    }
+    .health-item .label {
+      display: block;
+      color: var(--muted);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 5px;
+    }
+    .health-item .value {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .badge {
       display: inline-block;
       padding: 2px 8px;
@@ -695,6 +959,8 @@ function renderDashboard(): string {
     }
     .badge.online { background: #1a3d30; color: var(--ok); }
     .badge.offline { background: #3d1a1a; color: var(--deny); }
+    .badge.warn { background: #3d321a; color: var(--warn); }
+    .badge.muted { color: var(--muted); }
     .approval {
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -711,7 +977,7 @@ function renderDashboard(): string {
       word-break: break-all;
     }
     .approval pre {
-      background: #121820;
+      background: var(--code);
       padding: 8px;
       border-radius: 6px;
       font-size: 0.75rem;
@@ -719,10 +985,48 @@ function renderDashboard(): string {
       max-height: 120px;
       margin: 0 0 10px;
     }
-    .approval pre.diff {
+    .approval pre.diff,
+    pre.log-tail {
       max-height: 360px;
       color: #e7ecf3;
       border: 1px solid var(--border);
+    }
+    pre.log-tail {
+      max-height: 180px;
+      margin: 8px 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .diff-line {
+      display: block;
+      min-height: 1em;
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      white-space: pre-wrap;
+    }
+    .diff-add { color: #7ee787; background: rgba(46, 160, 67, 0.16); }
+    .diff-del { color: #ffa198; background: rgba(248, 81, 73, 0.14); }
+    .diff-hunk { color: #a5d6ff; background: rgba(56, 139, 253, 0.12); }
+    .diff-file { color: #d2a8ff; }
+    .diff-more {
+      margin: -4px 0 10px;
+      width: auto;
+      background: #243044;
+      color: var(--text);
+    }
+    .approval-actions {
+      position: sticky;
+      bottom: 0;
+      background: linear-gradient(180deg, rgba(26,35,50,0.88), var(--panel));
+      border-top: 1px solid var(--border);
+      padding-top: 10px;
+      margin-top: 8px;
+      z-index: 2;
+    }
+    .countdown {
+      color: var(--warn);
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      margin-left: 8px;
+      font-size: 0.82rem;
     }
     button {
       border: 0;
@@ -743,15 +1047,44 @@ function renderDashboard(): string {
       text-align: left;
     }
     button.toggle.active { border: 1px solid var(--accent); }
-    #audit {
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.82rem;
+    }
+    th, td {
+      text-align: left;
+      padding: 7px 8px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    th { color: var(--muted); font-weight: 600; }
+    td code {
       font-family: "IBM Plex Mono", ui-monospace, monospace;
-      font-size: 0.72rem;
+      font-size: 0.78rem;
+    }
+    #audit, #jobs {
       max-height: 320px;
       overflow: auto;
-      white-space: pre-wrap;
-      word-break: break-word;
-      color: var(--muted);
     }
+    .filter {
+      width: 100%;
+      margin: 0 0 10px;
+      padding: 8px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: #111923;
+      color: var(--text);
+    }
+    details.job {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 9px 10px;
+      margin: 8px 0;
+      background: #111923;
+    }
+    details.job summary { cursor: pointer; }
+    .job-meta { color: var(--muted); font-size: 0.8rem; margin: 6px 0; }
     .full { grid-column: 1 / -1; }
     .empty { color: var(--muted); font-size: 0.9rem; }
   </style>
@@ -762,6 +1095,12 @@ function renderDashboard(): string {
     <p>Local control — status, approvals, audit, policy</p>
   </header>
   <main>
+    <section class="full">
+      <h2>Health</h2>
+      <div id="health" class="health-strip">
+        <div class="health-item"><span class="label">Tunnel</span><span class="value">Loading...</span></div>
+      </div>
+    </section>
     <section>
       <h2>Status</h2>
       <div id="status" class="empty">Loading…</div>
@@ -779,11 +1118,19 @@ function renderDashboard(): string {
       <div id="approvals" class="empty">Loading…</div>
     </section>
     <section class="full">
-      <h2>Audit (recent)</h2>
+      <h2>Jobs (newest 20)</h2>
+      <div id="jobs" class="empty">Loading…</div>
+    </section>
+    <section class="full">
+      <h2>Audit</h2>
+      <input id="audit-filter" class="filter" placeholder="Filter by tool, outcome, code, or time"/>
       <div id="audit" class="empty">Loading…</div>
     </section>
   </main>
   <script>
+    var expandedDiffs = {};
+    var latestAuditEntries = [];
+
     async function fetchJson(path, opts) {
       const res = await fetch(path, opts);
       return res.json();
@@ -797,9 +1144,68 @@ function renderDashboard(): string {
         .replace(/"/g, "&quot;");
     }
 
+    function badge(text, cls) {
+      return '<span class="badge ' + cls + '">' + esc(text) + '</span>';
+    }
+
+    function formatRelativeTime(iso) {
+      if (!iso) return "never";
+      var ms = Date.now() - Date.parse(iso);
+      if (!Number.isFinite(ms)) return "unknown";
+      if (ms < 0) ms = 0;
+      var sec = Math.floor(ms / 1000);
+      if (sec < 60) return sec + "s ago";
+      var min = Math.floor(sec / 60);
+      if (min < 60) return min + "m ago";
+      var hr = Math.floor(min / 60);
+      return hr + "h ago";
+    }
+
+    function updateCountdowns() {
+      document.querySelectorAll("[data-expires]").forEach(function (el) {
+        var expires = Number(el.getAttribute("data-expires"));
+        if (!Number.isFinite(expires)) {
+          el.textContent = "expires unknown";
+          return;
+        }
+        var remaining = Math.max(0, Math.ceil((expires - Date.now()) / 1000));
+        el.textContent = remaining > 0 ? "expires in " + remaining + "s" : "expired";
+      });
+    }
+
+    function diffClass(line) {
+      if (line.indexOf("@@") === 0) return "diff-hunk";
+      if (line.indexOf("+++") === 0 || line.indexOf("---") === 0) return "diff-file";
+      if (line.indexOf("+") === 0) return "diff-add";
+      if (line.indexOf("-") === 0) return "diff-del";
+      return "";
+    }
+
+    function renderDiff(unified, collapsed) {
+      var lines = String(unified || "").split("\\n");
+      var visible = collapsed && lines.length > 40 ? lines.slice(0, 40) : lines;
+      return '<pre class="diff">' + visible.map(function (line) {
+        var cls = diffClass(line);
+        return '<span class="diff-line ' + cls + '">' + esc(line || " ") + '</span>';
+      }).join("") + '</pre>';
+    }
+
     async function refreshStatus() {
       const s = await fetchJson("/api/status");
       const online = s.online;
+      var reconnecting = !!s.reconnecting || s.connection_state === "connecting" || s.connection_state === "authenticating";
+      document.getElementById("health").innerHTML =
+        '<div class="health-item"><span class="label">Tunnel</span><span class="value">' +
+          badge(s.connection_state || "unknown", online ? "online" : (reconnecting ? "warn" : "offline")) +
+        '</span></div>' +
+        '<div class="health-item"><span class="label">Heartbeat</span><span class="value">' + esc(formatRelativeTime(s.last_heartbeat_at)) + '</span></div>' +
+        '<div class="health-item"><span class="label">Worker version</span><span class="value">' + esc(s.worker_version || "unknown") + '</span></div>' +
+        '<div class="health-item"><span class="label">Protocol</span><span class="value">' +
+          (s.protocol_warning ? badge(s.protocol_warning, "warn") : badge("ok", "online")) +
+        '</span></div>' +
+        '<div class="health-item"><span class="label">Reconnect</span><span class="value">' +
+          (reconnecting ? badge("reconnecting", "warn") : badge("idle", "muted")) +
+        '</span></div>';
       document.getElementById("status").innerHTML =
         '<div class="row"><span class="label">Worker</span><span>' + esc(s.worker_url || "—") + '</span></div>' +
         '<div class="row"><span class="label">Online</span><span class="badge ' + (online ? "online" : "offline") + '">' +
@@ -812,16 +1218,30 @@ function renderDashboard(): string {
     }
 
     async function refreshDevice() {
-      const d = await fetchJson("/api/local/device");
+      const d = await fetchJson("/api/local/devices");
       const el = document.getElementById("device");
-      if (!d.device_id) {
+      var local = d.local_device || {};
+      if (!local.device_id) {
         el.innerHTML = '<p class="empty">No local device config found.</p>';
         return;
       }
+      var devices = Array.isArray(d.devices) ? d.devices : [];
+      var deviceRows = devices.length
+        ? '<table><thead><tr><th>ID</th><th>Name</th><th>Status</th><th>Last seen</th></tr></thead><tbody>' +
+          devices.map(function (device) {
+            var id = device.id || device.device_id || "";
+            return '<tr><td><code>' + esc(id) + '</code></td><td>' + esc(device.name || device.device_name || "—") +
+              '</td><td>' + esc(device.status || "—") + '</td><td>' + esc(device.last_seen || device.last_seen_at || "—") + '</td></tr>';
+          }).join("") + '</tbody></table>'
+        : '<p class="empty">No Worker devices returned.</p>';
       el.innerHTML =
-        '<div class="row"><span class="label">Device ID</span><span>' + esc(d.device_id) + '</span></div>' +
-        '<div class="row"><span class="label">Name</span><span>' + esc(d.device_name || "—") + '</span></div>' +
-        '<div class="row"><span class="label">Worker</span><span>' + esc(d.worker_url || "—") + '</span></div>' +
+        '<div class="row"><span class="label">Local device</span><span><code>' + esc(local.device_id) + '</code></span></div>' +
+        '<div class="row"><span class="label">Preferred device</span><span><code>' + esc(d.preferred_device_id || local.preferred_device_id || "none") + '</code></span></div>' +
+        '<div class="row"><span class="label">Name</span><span>' + esc(local.device_name || "—") + '</span></div>' +
+        '<div class="row"><span class="label">Worker</span><span>' + esc(local.worker_url || "—") + '</span></div>' +
+        '<div class="row"><span class="label">Device source</span><span>' + esc(d.source || "local") + '</span></div>' +
+        (d.note ? '<p class="empty">' + esc(d.note) + '</p>' : "") +
+        deviceRows +
         '<button class="revoke" id="revoke-device">Revoke on Worker</button>' +
         '<p class="empty" id="device-message"></p>';
       const btn = document.getElementById("revoke-device");
@@ -850,18 +1270,32 @@ function renderDashboard(): string {
         return;
       }
       el.innerHTML = pending.map(function (a) {
+        var lines = a.diff && a.diff.unified ? String(a.diff.unified).split("\\n").length : 0;
+        var collapsed = lines > 40 && !expandedDiffs[a.id];
         var preview = a.diff && a.diff.unified
           ? '<div class="path">' + esc(a.diff.path || "") + '</div>' +
-            '<pre class="diff">' + esc(a.diff.unified) + '</pre>'
+            renderDiff(a.diff.unified, collapsed) +
+            (lines > 40 ? '<button class="diff-more" data-expand-diff="' + esc(a.id) + '">' +
+              (collapsed ? "Show more" : "Show less") + '</button>' : "")
           : '<pre>' + esc(a.argsSummary || "") + '</pre>';
         return '<div class="approval">' +
           '<div class="tool">' + esc(a.tool) + '</div>' +
-          '<div class="reason">' + esc(a.reason) + '</div>' +
+          '<div class="reason">' + esc(a.reason) +
+            ' <span class="countdown" data-expires="' + esc(a.expiresAt || 0) + '"></span></div>' +
           preview +
-          '<button class="approve" data-id="' + esc(a.id) + '" data-action="approve">Approve</button>' +
-          '<button class="deny" data-id="' + esc(a.id) + '" data-action="deny">Deny</button>' +
+          '<div class="approval-actions">' +
+            '<button class="approve" data-id="' + esc(a.id) + '" data-action="approve">Approve</button>' +
+            '<button class="deny" data-id="' + esc(a.id) + '" data-action="deny">Deny</button>' +
+          '</div>' +
         '</div>';
       }).join("");
+      el.querySelectorAll("button[data-expand-diff]").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var id = btn.getAttribute("data-expand-diff");
+          expandedDiffs[id] = !expandedDiffs[id];
+          refreshApprovals();
+        });
+      });
       el.querySelectorAll("button[data-id]").forEach(function (btn) {
         btn.addEventListener("click", async function () {
           const id = btn.getAttribute("data-id");
@@ -871,14 +1305,59 @@ function renderDashboard(): string {
           refreshStatus();
         });
       });
+      updateCountdowns();
+    }
+
+    async function refreshJobs() {
+      const data = await fetchJson("/api/jobs?limit=20");
+      const jobs = data.jobs || [];
+      const el = document.getElementById("jobs");
+      if (!jobs.length) {
+        el.innerHTML = '<p class="empty">No background jobs found.</p>';
+        return;
+      }
+      el.innerHTML = jobs.map(function (job) {
+        var statusClass = job.status === "completed" ? "online" : (job.status === "running" ? "warn" : "offline");
+        var tails = "";
+        if (job.stdout_tail) {
+          tails += '<p class="label">stdout tail</p><pre class="log-tail">' + esc(job.stdout_tail) + '</pre>';
+        }
+        if (job.stderr_tail) {
+          tails += '<p class="label">stderr tail</p><pre class="log-tail">' + esc(job.stderr_tail) + '</pre>';
+        }
+        if (!tails) tails = '<p class="empty">No stdout/stderr tail yet.</p>';
+        return '<details class="job">' +
+          '<summary>' + badge(job.status || "unknown", statusClass) + ' <code>' + esc(job.id) + '</code> ' + esc(job.command || "") + '</summary>' +
+          '<div class="job-meta">started ' + esc(job.started_at || "unknown") +
+            ' · exit ' + esc(job.exit_code === null || job.exit_code === undefined ? "—" : job.exit_code) +
+            (job.signal ? ' · signal ' + esc(job.signal) : "") + '</div>' +
+          (job.error ? '<p class="empty">' + esc(job.error) + '</p>' : "") +
+          tails +
+        '</details>';
+      }).join("");
     }
 
     async function refreshAudit() {
       const data = await fetchJson("/api/audit?limit=50");
-      const entries = data.entries || [];
-      document.getElementById("audit").textContent = entries.length
-        ? entries.map(function (e) { return JSON.stringify(e); }).join("\\n")
-        : "No audit entries";
+      latestAuditEntries = data.entries || [];
+      renderAudit();
+    }
+
+    function renderAudit() {
+      var filter = (document.getElementById("audit-filter").value || "").toLowerCase();
+      var entries = latestAuditEntries.filter(function (entry) {
+        if (!filter) return true;
+        return JSON.stringify(entry).toLowerCase().indexOf(filter) !== -1;
+      });
+      document.getElementById("audit").innerHTML = entries.length
+        ? '<table><thead><tr><th>Time</th><th>Tool</th><th>Outcome/code</th><th>Duration</th></tr></thead><tbody>' +
+          entries.map(function (e) {
+            var outcome = e.outcome || "—";
+            var code = e.code ? " / " + e.code : "";
+            return '<tr><td>' + esc(e.ts || e.time || "") + '</td><td><code>' + esc(e.tool || "") +
+              '</code></td><td>' + esc(outcome + code) + '</td><td>' + esc(e.duration_ms === undefined ? "—" : e.duration_ms) + 'ms</td></tr>';
+          }).join("") + '</tbody></table>'
+        : '<p class="empty">No matching audit entries.</p>';
     }
 
     async function refreshPolicy() {
@@ -946,13 +1425,15 @@ function renderDashboard(): string {
 
     async function tick() {
       try {
-        await Promise.all([refreshStatus(), refreshDevice(), refreshApprovals(), refreshAudit(), refreshPolicy()]);
+        await Promise.all([refreshStatus(), refreshDevice(), refreshApprovals(), refreshJobs(), refreshAudit(), refreshPolicy()]);
       } catch (e) {
         console.error(e);
       }
     }
+    document.getElementById("audit-filter").addEventListener("input", renderAudit);
     tick();
     setInterval(tick, 2000);
+    setInterval(updateCountdowns, 1000);
   </script>
 </body>
 </html>`;

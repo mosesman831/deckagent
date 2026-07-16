@@ -837,8 +837,14 @@ async function testConfirmationFlow(): Promise<void> {
       `http://127.0.0.1:19148/confirm/${diffApproval.id}`,
     );
     const diffHtml = await diffPage.text();
-    assert(diffHtml.includes('class="diff"'), "confirm page renders diff block");
+    assert(diffHtml.includes('class="diff diff-colored"'), "confirm page renders diff block");
     assert(diffHtml.includes("@@ -1,1 +1,1 @@"), "confirm page includes hunk marker");
+    assert(diffHtml.includes('id="expiry-countdown"'), "confirm page includes expiry countdown");
+    assert(diffHtml.includes("risk-banner"), "confirm page includes risk banner");
+    assert(diffHtml.includes("action-footer"), "confirm page includes sticky action footer");
+    assert(diffHtml.includes("diff-add"), "confirm page includes added-line diff class");
+    assert(diffHtml.includes("diff-del"), "confirm page includes removed-line diff class");
+    assert(diffHtml.includes("diff-hunk"), "confirm page includes hunk diff class");
     assert(!diffHtml.includes("old_string"), "diff-backed page omits raw args");
     assert(server.denyForTest(diffApproval.id), "deny diff approval cleanup");
 
@@ -1723,9 +1729,44 @@ async function testControlUi(): Promise<void> {
   const confirmation = new ConfirmationServer(logger, { port: 19150 });
   await confirmation.start();
   const uiTokenDir = mkdtempSync(join(tmpdir(), "deckagent-ui-token-"));
+  const jobsDir = join(uiTokenDir, "jobs");
   setMetricsPathForTest(join(uiTokenDir, "metrics.json"));
   resetMetricsForTest();
   recordToolOk();
+  for (let i = 1; i <= 22; i++) {
+    const id = `job-${String(i).padStart(2, "0")}`;
+    const dir = join(jobsDir, id);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "meta.json"),
+      JSON.stringify(
+        {
+          id,
+          command: `echo ${i}`,
+          cwd: "/tmp",
+          status: i % 2 === 0 ? "completed" : "running",
+          pid: null,
+          started_at: new Date(Date.UTC(2026, 0, 1, 0, i, 0)).toISOString(),
+          updated_at: new Date(Date.UTC(2026, 0, 1, 0, i, 1)).toISOString(),
+          ended_at: i % 2 === 0 ? new Date(Date.UTC(2026, 0, 1, 0, i, 2)).toISOString() : undefined,
+          timeout_ms: 60_000,
+          exit_code: i % 2 === 0 ? 0 : null,
+          signal: null,
+          stdout_bytes: 1,
+          stderr_bytes: 1,
+          stdout_truncated: false,
+          stderr_truncated: false,
+        },
+        null,
+        2,
+      ),
+    );
+    writeFileSync(
+      join(dir, "stdout.log"),
+      Array.from({ length: 45 }, (_unused, line) => `out-${i}-${line + 1}`).join("\n"),
+    );
+    writeFileSync(join(dir, "stderr.log"), `err-${i}\n`);
+  }
 
   let policy = createDefaultPolicy();
   const deviceConfig = {
@@ -1734,12 +1775,13 @@ async function testControlUi(): Promise<void> {
     worker_url: "https://example.workers.dev",
     device_name: "test-device",
     api_token: "a".repeat(32),
+    preferred_device_id: "22222222-2222-4222-8222-222222222222",
     heartbeat_interval: 15,
     tool_timeout: 60,
     auto_connect: true,
     log_level: "error" as const,
   };
-  const workerDeleteCalls: Array<{ input: string | URL; method?: string; auth?: string }> = [];
+  const workerCalls: Array<{ input: string | URL; method?: string; auth?: string }> = [];
   const control = new ControlUiServer({
     logger,
     confirmationServer: confirmation,
@@ -1753,6 +1795,10 @@ async function testControlUi(): Promise<void> {
       online: false,
       connection_state: "stopped",
       pending_approvals: confirmation.pendingCount(),
+      last_heartbeat_at: "2026-01-01T00:00:00.000Z",
+      worker_version: "worker-test",
+      protocol_warning: "upgrade available",
+      reconnecting: true,
     }),
     getPolicy: () => policy,
     setPolicy: (p) => {
@@ -1760,17 +1806,37 @@ async function testControlUi(): Promise<void> {
     },
     getDeviceConfig: () => deviceConfig,
     fetch: async (input, init) => {
-      workerDeleteCalls.push({
+      workerCalls.push({
         input,
         method: init?.method,
         auth: init?.headers?.Authorization,
       });
+      if (init?.method === "GET" && String(input).endsWith("/api/devices")) {
+        return new Response(
+          JSON.stringify({
+            preferred_device_id: deviceConfig.preferred_device_id,
+            devices: [
+              {
+                id: deviceConfig.device_id,
+                name: deviceConfig.device_name,
+                status: "online",
+                last_seen: "2026-01-01T00:00:00.000Z",
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
       return new Response(JSON.stringify({ ok: true }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
     },
     uiTokenDir,
+    jobsDir,
   });
 
   try {
@@ -1818,10 +1884,16 @@ async function testControlUi(): Promise<void> {
       worker_url: string;
       pending_approvals: number;
       daemon_version: string;
+      worker_version?: string;
+      protocol_warning?: string;
+      reconnecting?: boolean;
     };
     assertEqual(status.worker_url, "https://example.workers.dev", "status worker_url");
     assertEqual(status.pending_approvals, 0, "no pending initially");
     assert(typeof status.daemon_version === "string", "daemon_version present");
+    assertEqual(status.worker_version, "worker-test", "status worker_version");
+    assertEqual(status.protocol_warning, "upgrade available", "status protocol_warning");
+    assertEqual(status.reconnecting, true, "status reconnecting");
 
     const localDeviceRes = await fetch("http://127.0.0.1:19151/api/local/device");
     assert(localDeviceRes.ok, "GET /api/local/device ok");
@@ -1836,11 +1908,67 @@ async function testControlUi(): Promise<void> {
     assertEqual(localDevice.worker_url, deviceConfig.worker_url, "local worker_url returned");
     assertEqual(localDevice.api_token, undefined, "local device endpoint omits api_token");
 
+    const localDevicesRes = await fetch("http://127.0.0.1:19151/api/local/devices");
+    assert(localDevicesRes.ok, "GET /api/local/devices ok");
+    const localDevices = (await localDevicesRes.json()) as {
+      source?: string;
+      preferred_device_id?: string | null;
+      devices?: Array<{ id?: string; name?: string; status?: string }>;
+      local_device?: { device_id?: string; api_token?: string };
+    };
+    assertEqual(localDevices.source, "worker", "local devices proxies Worker when token exists");
+    assertEqual(
+      localDevices.preferred_device_id,
+      deviceConfig.preferred_device_id,
+      "local devices includes preferred_device_id",
+    );
+    assertEqual(
+      localDevices.local_device?.device_id,
+      deviceConfig.device_id,
+      "local devices includes local device",
+    );
+    assertEqual(
+      localDevices.local_device?.api_token,
+      undefined,
+      "local devices omits api_token",
+    );
+    assertEqual(localDevices.devices?.[0]?.status, "online", "local devices returns Worker device status");
+    const deviceGetCalls = workerCalls.filter((call) => call.method === "GET");
+    assertEqual(deviceGetCalls.length, 1, "local devices calls Worker GET once");
+    assertEqual(String(deviceGetCalls[0]!.input), "https://example.workers.dev/api/devices", "local devices Worker URL");
+    assertEqual(
+      deviceGetCalls[0]!.auth,
+      `Bearer ${deviceConfig.api_token}`,
+      "local devices uses Bearer api_token",
+    );
+
+    const jobsRes = await fetch("http://127.0.0.1:19151/api/jobs");
+    assert(jobsRes.ok, "GET /api/jobs ok");
+    const jobsBody = (await jobsRes.json()) as {
+      jobs?: Array<{ id?: string; command?: string; stdout_tail?: string; stderr_tail?: string }>;
+    };
+    assertEqual(jobsBody.jobs?.length, 20, "jobs endpoint returns newest 20");
+    assertEqual(jobsBody.jobs?.[0]?.id, "job-22", "jobs endpoint sorts newest first");
+    assert(
+      jobsBody.jobs?.[0]?.stdout_tail?.includes("out-22-45") === true,
+      "jobs endpoint includes stdout tail",
+    );
+    assertEqual(
+      jobsBody.jobs?.[0]?.stdout_tail?.split("\n")[0],
+      "out-22-6",
+      "jobs endpoint trims stdout to tail lines",
+    );
+    assertEqual(jobsBody.jobs?.[0]?.stderr_tail, "err-22\n", "jobs endpoint includes stderr tail");
+
     const revokeNoToken = await fetch("http://127.0.0.1:19151/api/local/device/revoke", {
       method: "POST",
     });
     assertEqual(revokeNoToken.status, 401, "device revoke without UI token → 401");
-    assertEqual(workerDeleteCalls.length, 0, "unauthorized revoke does not call Worker");
+    assertEqual(
+      workerCalls.filter((call) => call.method === "DELETE").length,
+      0,
+      "unauthorized revoke does not call Worker DELETE",
+    );
 
     const revokeRes = await fetch("http://127.0.0.1:19151/api/local/device/revoke", {
       method: "POST",
@@ -1853,6 +1981,7 @@ async function testControlUi(): Promise<void> {
     const revokeBody = (await revokeRes.json()) as { ok?: boolean; device_id?: string };
     assertEqual(revokeBody.ok, true, "device revoke response ok");
     assertEqual(revokeBody.device_id, deviceConfig.device_id, "device revoke response id");
+    const workerDeleteCalls = workerCalls.filter((call) => call.method === "DELETE");
     assertEqual(workerDeleteCalls.length, 1, "device revoke calls Worker once");
     assertEqual(
       String(workerDeleteCalls[0]!.input),
@@ -1953,6 +2082,11 @@ async function testControlUi(): Promise<void> {
     assert(cookie.includes("SameSite=Strict"), "UI cookie is SameSite=Strict");
     const html = await homePage.text();
     assert(html.includes("DeckAgent"), "dashboard shows DeckAgent");
+    assert(html.includes('id="health"'), "dashboard includes health strip");
+    assert(html.includes('id="jobs"'), "dashboard includes jobs panel");
+    assert(html.includes('id="audit-filter"'), "dashboard includes audit filter");
+    assert(html.includes("diff-add"), "dashboard includes colored diff classes");
+    assert(html.includes("data-expires"), "dashboard includes approval countdown markup");
 
     const cookieApproval = confirmation.createApproval({
       tool: "execute_command",

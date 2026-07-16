@@ -101,6 +101,11 @@ export class TunnelClient {
   private disconnectNotifyDebounceMs: number;
   private disconnectedSinceLastConnect = false;
   private lastDisconnectNotifyAt: number | null = null;
+  private connectedAt: Date | null = null;
+  private lastDisconnectAt: Date | null = null;
+  private lastDisconnectReason: string | null = null;
+  private reconnectAttempt = 0;
+  private nextReconnectAt: Date | null = null;
 
   constructor(
     config: Config,
@@ -129,6 +134,23 @@ export class TunnelClient {
     return this.state;
   }
 
+  getStatusSnapshot(): {
+    last_heartbeat_at: string | null;
+    worker_version: string | null;
+    protocol_warning: string | null;
+    reconnecting: boolean;
+  } {
+    return {
+      last_heartbeat_at: this.lastHeartbeatAt?.toISOString() ?? null,
+      worker_version: this.workerVersion ?? null,
+      protocol_warning: this.protocolWarning ?? null,
+      reconnecting:
+        this.reconnectTimer !== null ||
+        (this.disconnectedSinceLastConnect &&
+          (this.state === "connecting" || this.state === "authenticating")),
+    };
+  }
+
   /**
    * Re-send policy_caps to the Worker (e.g. after Control UI policy POST).
    * No-op when not connected or getCaps was not provided.
@@ -142,6 +164,7 @@ export class TunnelClient {
     if (this.state === "connecting" || this.state === "connected") {
       return;
     }
+    this.nextReconnectAt = null;
     this.setState("connecting");
     this.shouldReconnect = true;
     this.bufferedData = "";
@@ -163,6 +186,7 @@ export class TunnelClient {
       this.logger.error(
         `Failed to create WebSocket: ${humanError(err)}`,
       );
+      this.recordTunnelDisconnected(`websocket_create_failed: ${humanError(err)}`);
       this.scheduleReconnect();
       return;
     }
@@ -177,6 +201,8 @@ export class TunnelClient {
     this.logger.info("Disconnecting WebSocket tunnel");
     this.shouldReconnect = false;
     this.clearReconnectTimer();
+    this.reconnectAttempt = 0;
+    this.nextReconnectAt = null;
     this.stopHeartbeat();
     this.stopHeartbeatTimeout();
 
@@ -200,11 +226,13 @@ export class TunnelClient {
     }
 
     this.setState("stopped");
+    this.recordTunnelDisconnected("daemon_shutdown");
     this.writeHealth("disconnected", false);
   }
 
   private onOpen(): void {
     this.logger.info("WebSocket open; sending auth");
+    this.nextReconnectAt = null;
     this.setState("authenticating");
     this.reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
     this.clearReconnectTimer();
@@ -292,6 +320,7 @@ export class TunnelClient {
       this.pendingAuth?.reject(new Error(message));
       this.pendingAuth = null;
       this.shouldReconnect = false;
+      this.recordTunnelDisconnected("malformed_auth_ok");
       this.ws?.close(1002, "malformed_auth_ok");
       this.writeHealth("disconnected", false);
       return;
@@ -313,6 +342,7 @@ export class TunnelClient {
       this.shouldReconnect = false;
       this.stopHeartbeat();
       this.stopHeartbeatTimeout();
+      this.recordTunnelDisconnected("protocol_version_unsupported");
       this.writeHealth("disconnected", false);
       this.ws?.close(1002, "protocol_version_unsupported");
       return;
@@ -324,6 +354,9 @@ export class TunnelClient {
 
     this.logger.info("Authentication successful");
     const shouldNotifyReconnect = this.disconnectedSinceLastConnect;
+    this.connectedAt = new Date(this.now());
+    this.reconnectAttempt = 0;
+    this.nextReconnectAt = null;
     this.setState("connected");
     if (shouldNotifyReconnect) {
       this.notify(
@@ -374,6 +407,7 @@ export class TunnelClient {
     this.pendingAuth?.reject(new Error(`Authentication failed: ${reason}`));
     this.pendingAuth = null;
     this.shouldReconnect = false;
+    this.recordTunnelDisconnected(`auth_failed: ${reason}`);
     this.ws?.close(1008, "auth_failed");
   }
 
@@ -388,6 +422,7 @@ export class TunnelClient {
     const wasConnected = this.state === "connected";
     const reasonText = reason.toString("utf-8") || String(code);
     this.logger.warn(`WebSocket closed: ${code} ${reasonText}`);
+    this.recordTunnelDisconnected(reasonText);
     this.ws = null;
     this.pendingAuth?.reject(new Error(`WebSocket closed: ${code}`));
     this.pendingAuth = null;
@@ -408,6 +443,7 @@ export class TunnelClient {
 
   private onError(err: Error): void {
     this.logger.error(`WebSocket error: ${humanError(err)}`);
+    this.recordTunnelDisconnected(`websocket_error: ${humanError(err)}`);
     this.pendingAuth?.reject(err);
     this.pendingAuth = null;
     this.ws?.terminate();
@@ -443,6 +479,7 @@ export class TunnelClient {
     this.stopHeartbeatTimeout();
     this.heartbeatTimeoutTimer = setTimeout(() => {
       this.logger.warn("Heartbeat timeout; reconnecting");
+      this.recordTunnelDisconnected("heartbeat_timeout");
       this.ws?.terminate();
       this.ws = null;
       if (this.shouldReconnect) {
@@ -484,18 +521,19 @@ export class TunnelClient {
       this.setState("stopped");
     }
 
-    this.logger.info(
-      `Reconnecting in ${this.reconnectDelay}ms`,
-    );
+    const delayMs = this.reconnectDelay;
+    this.reconnectAttempt += 1;
+    this.nextReconnectAt = new Date(this.now() + delayMs);
+    this.logger.info(`Reconnecting in ${delayMs}ms`);
     recordReconnectMetric();
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.reconnectDelay = Math.min(
-        this.reconnectDelay * 2,
+        delayMs * 2,
         MAX_RECONNECT_DELAY_MS,
       );
       this.connect();
-    }, this.reconnectDelay);
+    }, delayMs);
     this.writeHealth("connecting", false);
   }
 
@@ -528,6 +566,12 @@ export class TunnelClient {
     );
   }
 
+  private recordTunnelDisconnected(reason: string): void {
+    this.connectedAt = null;
+    this.lastDisconnectAt = new Date(this.now());
+    this.lastDisconnectReason = reason;
+  }
+
   private notify(title: string, body: string): void {
     try {
       this.notifier(title, body);
@@ -547,6 +591,11 @@ export class TunnelClient {
           lastHeartbeatAt: this.lastHeartbeatAt ?? undefined,
           workerVersion: this.workerVersion,
           protocolWarning: this.protocolWarning,
+          connectedAt: this.connectedAt,
+          lastDisconnectAt: this.lastDisconnectAt,
+          lastDisconnectReason: this.lastDisconnectReason,
+          reconnectAttempt: this.reconnectAttempt,
+          nextReconnectAt: this.nextReconnectAt,
         }),
         this.healthPath,
       );

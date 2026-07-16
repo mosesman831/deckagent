@@ -310,6 +310,7 @@ async function main(): Promise<void> {
     confirmationServer,
     getStatus: () => {
       const state = client.getState();
+      const tunnel = client.getStatusSnapshot();
       const ws = executor.getWorkspace();
       return {
         worker_url: config.worker_url,
@@ -321,6 +322,10 @@ async function main(): Promise<void> {
         online: state === "connected",
         connection_state: state,
         pending_approvals: confirmationServer.pendingCount(),
+        last_heartbeat_at: tunnel.last_heartbeat_at,
+        worker_version: tunnel.worker_version,
+        protocol_warning: tunnel.protocol_warning,
+        reconnecting: tunnel.reconnecting,
       };
     },
     getDeviceConfig: () => config,

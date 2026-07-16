@@ -486,12 +486,13 @@ export class ConfirmationServer {
       ? `
           <p class="label">Diff preview</p>
           <p class="path">${escapeHtml(approval.diff.path)}</p>
-          <pre class="diff">${escapeHtml(approval.diff.unified)}</pre>
+          <pre class="diff diff-colored">${renderUnifiedDiffHtml(approval.diff.unified)}</pre>
         `
       : `
           <p class="label">Arguments</p>
           <pre class="args">${escapeHtml(approval.argsSummary)}</pre>
         `;
+    const risk = riskBannerForTool(approval.tool);
 
     sendHtml(
       res,
@@ -500,20 +501,25 @@ export class ConfirmationServer {
         "Approve tool execution?",
         `
         <p><strong>DeckAgent</strong> needs your approval to run a tool on this machine.</p>
+        <div class="risk-banner ${risk.className}">
+          <strong>Review the risk:</strong> ${escapeHtml(risk.text)}
+        </div>
         <div class="panel">
           <p class="tool-name">Tool: <code>${escapeHtml(approval.tool)}</code></p>
           <p class="reason">${escapeHtml(approval.reason)}</p>
           ${preview}
-          <p class="expires">Expires in ~${remainingSec}s</p>
+          <p class="expires">Expires in <span id="expiry-countdown" class="countdown" data-expires-at="${approval.expiresAt}">${remainingSec}s</span></p>
         </div>
-        <form method="POST" action="/confirm/${id}/approve" style="display:inline">
-          <input type="hidden" name="csrf" value="${escapeHtml(approval.csrfToken)}"/>
-          <button type="submit" class="btn approve">Approve</button>
-        </form>
-        <form method="POST" action="/confirm/${id}/deny" style="display:inline;margin-left:12px">
-          <input type="hidden" name="csrf" value="${escapeHtml(approval.csrfToken)}"/>
-          <button type="submit" class="btn deny">Deny</button>
-        </form>
+        <div class="action-footer">
+          <form method="POST" action="/confirm/${id}/approve">
+            <input type="hidden" name="csrf" value="${escapeHtml(approval.csrfToken)}"/>
+            <button type="submit" class="btn approve">Approve</button>
+          </form>
+          <form method="POST" action="/confirm/${id}/deny">
+            <input type="hidden" name="csrf" value="${escapeHtml(approval.csrfToken)}"/>
+            <button type="submit" class="btn deny">Deny</button>
+          </form>
+        </div>
         `,
       ),
     );
@@ -621,6 +627,65 @@ function escapeHtml(text: string): string {
     .replace(/"/g, "&quot;");
 }
 
+function renderUnifiedDiffHtml(unified: string): string {
+  return unified
+    .split("\n")
+    .map((line) => {
+      const cls = diffLineClass(line);
+      return `<span class="diff-line ${cls}">${escapeHtml(line || " ")}</span>`;
+    })
+    .join("");
+}
+
+function diffLineClass(line: string): string {
+  if (line.startsWith("@@")) return "diff-hunk";
+  if (line.startsWith("+++") || line.startsWith("---")) return "diff-file";
+  if (line.startsWith("+")) return "diff-add";
+  if (line.startsWith("-")) return "diff-del";
+  return "";
+}
+
+function riskBannerForTool(tool: string): { className: string; text: string } {
+  if (
+    tool === "write_file" ||
+    tool === "edit_file" ||
+    tool === "move_file" ||
+    tool === "create_directory" ||
+    tool === "restore_snapshot"
+  ) {
+    return {
+      className: "risk-files",
+      text:
+        "Approving allows DeckAgent to change files on this computer for this one request. Review paths and diffs before approving.",
+    };
+  }
+  if (
+    tool === "execute_command" ||
+    tool === "execute_command_stream" ||
+    tool === "start_job" ||
+    tool === "cancel_job" ||
+    tool === "kill_process"
+  ) {
+    return {
+      className: "risk-shell",
+      text:
+        "Approving allows DeckAgent to run or control a local process for this one request. Check the command and working directory carefully.",
+    };
+  }
+  if (tool.startsWith("browser_")) {
+    return {
+      className: "risk-browser",
+      text:
+        "Approving allows DeckAgent to control the local browser for this one request. Make sure the target page and action are expected.",
+    };
+  }
+  return {
+    className: "risk-general",
+    text:
+      "Approving allows this DeckAgent tool to run once on this computer. Deny if the request is unexpected.",
+  };
+}
+
 function htmlPage(title: string, body: string): string {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -629,17 +694,30 @@ function htmlPage(title: string, body: string): string {
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>${escapeHtml(title)} — DeckAgent</title>
   <style>
-    body { font-family: ui-sans-serif, system-ui, sans-serif; max-width: 860px; margin: 40px auto; padding: 0 16px; color: #1f2328; background: #f6f8fa; }
+    body { font-family: ui-sans-serif, system-ui, sans-serif; max-width: 860px; margin: 40px auto 120px; padding: 0 16px; color: #1f2328; background: #f6f8fa; }
     h1 { font-size: 1.4rem; margin-bottom: 8px; }
     .panel { background: #fff; border: 1px solid #d0d7de; border-radius: 8px; padding: 16px 18px; margin: 16px 0 20px; }
+    .risk-banner { border: 1px solid #d0d7de; border-radius: 8px; padding: 12px 14px; margin: 14px 0; background: #fff8c5; color: #4d3800; }
+    .risk-shell { background: #ffebe9; color: #5d0f0a; border-color: #ffcecb; }
+    .risk-files { background: #fff8c5; color: #4d3800; border-color: #f0d98c; }
+    .risk-browser { background: #ddf4ff; color: #0a3069; border-color: #b6e3ff; }
+    .risk-general { background: #f6f8fa; color: #57606a; }
     .tool-name { font-size: 1.05rem; margin: 0 0 8px; }
     .reason { color: #57606a; margin: 0 0 12px; }
     .label { font-weight: 600; margin: 0 0 6px; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.02em; color: #57606a; }
     code, pre.args, pre.diff { background: #f6f8fa; padding: 2px 6px; border-radius: 4px; font-size: 0.9rem; }
     pre.args, pre.diff { padding: 12px; overflow: auto; margin: 0 0 12px; border: 1px solid #eaeef2; white-space: pre-wrap; word-break: break-word; }
     pre.diff { max-height: 420px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.82rem; background: #0d1117; color: #e6edf3; }
+    .diff-line { display: block; min-height: 1em; white-space: pre-wrap; }
+    .diff-add { color: #7ee787; background: rgba(46, 160, 67, 0.18); }
+    .diff-del { color: #ffa198; background: rgba(248, 81, 73, 0.16); }
+    .diff-hunk { color: #a5d6ff; background: rgba(56, 139, 253, 0.14); }
+    .diff-file { color: #d2a8ff; }
     .path { margin: -2px 0 8px; color: #57606a; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.82rem; word-break: break-all; }
     .expires { margin: 0; color: #57606a; font-size: 0.9rem; }
+    .countdown { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #9a6700; font-weight: 600; }
+    .action-footer { position: fixed; left: 0; right: 0; bottom: 0; display: flex; justify-content: center; gap: 12px; padding: 14px 16px; background: rgba(255, 255, 255, 0.96); border-top: 1px solid #d0d7de; box-shadow: 0 -8px 24px rgba(31, 35, 40, 0.08); }
+    .action-footer form { margin: 0; }
     .btn { color: #fff; padding: 10px 18px; border: 0; cursor: pointer; font-size: 16px; border-radius: 6px; }
     .btn.approve { background: #1a7f37; }
     .btn.deny { background: #cf222e; }
@@ -648,6 +726,22 @@ function htmlPage(title: string, body: string): string {
 <body>
   <h1>${escapeHtml(title)}</h1>
   ${body}
+  <script>
+    (function () {
+      var el = document.getElementById("expiry-countdown");
+      if (!el) return;
+      var expires = Number(el.getAttribute("data-expires-at"));
+      function tick() {
+        var remaining = Math.max(0, Math.ceil((expires - Date.now()) / 1000));
+        el.textContent = remaining + "s";
+        if (remaining <= 0) {
+          el.classList.add("expired");
+        }
+      }
+      tick();
+      setInterval(tick, 1000);
+    })();
+  </script>
 </body>
 </html>`;
 }
