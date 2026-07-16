@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build mcp-server
+        run: npm run build --workspace=packages/mcp-server
+
+      - name: Build cloudflare-worker
+        run: npm run build --workspace=packages/cloudflare-worker
+
+      - name: Build desktop-daemon
+        run: npm run build --workspace=packages/desktop-daemon
+
+      - name: Build cli
+        run: npm run build --workspace=packages/cli
+
+      - name: Pack public packages
+        run: |
+          mkdir -p deckagent-packs
+          npm pack --workspace=packages/mcp-server --pack-destination deckagent-packs
+          npm pack --workspace=packages/desktop-daemon --pack-destination deckagent-packs
+          npm pack --workspace=packages/cli --pack-destination deckagent-packs
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deckagent-packages
+          path: deckagent-packs/*.tgz
+          if-no-files-found: error
+
+      - name: Publish public packages to npm
+        if: env.NPM_TOKEN != ''
+        env:
+          NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
+        run: |
+          npm publish --workspace=packages/mcp-server --access public
+          npm publish --workspace=packages/desktop-daemon --access public
+          npm publish --workspace=packages/cli --access public
+
+      - name: Skip npm publish
+        if: env.NPM_TOKEN == ''
+        run: echo "::notice::NPM_TOKEN secret is not configured; uploaded package artifacts without publishing to npm."

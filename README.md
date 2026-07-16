@@ -256,14 +256,18 @@ deckagent tunnel --name deckagent-dev
 
 Configure ingress in `~/.cloudflared/config.yml` so the named tunnel forwards to `http://127.0.0.1:8787`. Production setups should still prefer a deployed Worker on `*.workers.dev` (or a custom domain on the Worker) — tunnels are ideal for local/dev or when you need a stable hostname in front of `wrangler dev`.
 
-### Publishing the CLI (`npx @deckagent/cli`)
+### Releasing
+
+Update [CHANGELOG.md](CHANGELOG.md), run the release checks, then tag the release:
 
 ```bash
-npm run bundle:cli   # copies Worker sources into packages/cli/assets/worker
-npm run build
-node scripts/pack-smoke.mjs
-# publish in order: @deckagent/mcp-server, @deckagent/desktop-daemon, @deckagent/cli
+npm run ci
+git tag v0.2.0
+git push origin v0.2.0
 ```
+
+The tag workflow packs the public packages and publishes them to npm only when the
+`NPM_TOKEN` repository secret is configured.
 
 ## Development
 
