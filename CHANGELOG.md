@@ -9,8 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Wave 5 operator experience: `deckagent onboard`, `deckagent smoke`, confirmation unified diffs, device revoke (CLI + Control UI), background job tools (`start_job`/`list_jobs`/`get_job`/`cancel_job`), plugin `sha256` integrity, tunnel/budget desktop alerts, and `npm run e2e:mcp` live MCP curl harness.
 - `deckagent token rotate [--deploy]` for Worker Bearer token rotation.
 - Canonical `SPEC.md` index and refreshed operator security/readiness docs.
+- Daemon/Worker metrics endpoints and best-effort abort signals for long tools.
 
 ## [0.2.0] - 2026-07-16
 

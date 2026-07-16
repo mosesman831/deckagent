@@ -77,20 +77,26 @@ npx @deckagent/cli daemon --foreground
 - **Policy engine** — trusted/denied/protected paths, allowlist/blocklist commands, read-only, confirmation, profiles
 - **Packaged CLI** — install with `npm install -g @deckagent/cli` or run `npx @deckagent/cli setup`
 - **Cross-platform daemon install** — macOS LaunchAgent, Linux systemd user service, Windows scheduled task at logon
+- **Onboard + smoke** — `deckagent onboard` / `deckagent smoke` prove Worker+daemon+MCP health
+- **Confirmation diffs** — unified diff preview for write/edit approvals
+- **Background jobs** — `start_job` / `list_jobs` / `get_job` / `cancel_job`
+- **Device revoke** — CLI + Control UI unregister devices on the Worker
+- **Plugin integrity** — optional/required `sha256` pins under strict profiles
+- **Live MCP e2e** — `npm run e2e:mcp` spins wrangler+daemon and curls `/mcp`
 
 ### Experimental / high-trust
 
-- **Custom plugins** are supported, but plugins execute local code. Enable them only for plugin authors and plugin code you trust.
+- **Custom plugins** are supported, but plugins execute local code. Enable them only for plugin authors and plugin code you trust. Prefer pinning `integrity.sha256`.
 - **v2 browser extension** works with the listed AI sites, but those sites can change internal APIs without notice and the extension has not gone through Chrome Web Store review.
 - **`terminal_mode=sandbox_fs`** requires an OS sandbox binary. On Linux, install `bwrap`; without it, sandbox mode fails closed.
 
 ### Planned / not shipped
 
-- Local and Worker metrics endpoints/counters from PR2.2
-- Best-effort abort signals for long-running tools from PR2.5
 - ChatGPT OAuth app flow; DeckAgent currently uses Bearer tokens only
 - Chrome Web Store publication for the experimental v2 extension
 - Multi-tenant SaaS, team billing, or hosted relay mode
+- Full computer-use / OS GUI automation suite beyond Playwright page tools
+- Signed native installers (Homebrew / pkg / msi)
 
 ## How It Works
 
@@ -116,6 +122,7 @@ The Worker and daemon communicate through a Durable Object that acts as both the
 |----------|-------|
 | **Filesystem** | `read_file`, `write_file`, `edit_file`, `search_files`, `list_directory`, `create_directory`, `move_file`, `get_file_info`, `read_multiple_files` |
 | **Terminal** | `execute_command`, `execute_command_stream`, `list_processes`, `kill_process` |
+| **Jobs** | `start_job`, `list_jobs`, `get_job`, `cancel_job` |
 | **Browser** | `browser_navigate`, `browser_screenshot`, `browser_click`, `browser_evaluate` |
 | **Snapshots** | `list_snapshots`, `restore_snapshot` |
 | **Environment** | `get_environment` |

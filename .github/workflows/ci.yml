@@ -68,6 +68,11 @@ jobs:
         env:
           CI: true
 
+      - name: Live MCP e2e (wrangler + daemon curl)
+        run: npm run e2e:mcp
+        env:
+          CI: true
+
       - name: Install + test + build v2-extension
         run: |
           npm run test --workspace=packages/v2-extension

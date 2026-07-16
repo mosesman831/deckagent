@@ -1,6 +1,6 @@
 # DeckAgent — Wave 5 Operator Experience Spec
 
-> Status: **SPEC → IMPLEMENT**  
+> Status: **IMPLEMENTED** — verified with `npm run e2e:mcp` (initialize, tools/list, get_environment, list_directory, start_job/get_job).  
 > Goal: Ship the highest-leverage post-hardening features: first-run confidence, safer approvals, device control, background jobs, plugin integrity, and a real MCP/curl smoke path.  
 > Assumes Waves 2–4, F1–F10, and production P0–P2 are complete.
 
@@ -250,15 +250,15 @@ curl -sS -X POST "$BASE/mcp" \
 
 ## 5. Acceptance checklist
 
-- [ ] `deckagent onboard` exits 0 on healthy local stack
-- [ ] `deckagent smoke` passes against live Worker+daemon
-- [ ] write/edit confirmation shows unified diff
-- [ ] `deckagent device revoke` + UI revoke path work
-- [ ] `start_job` / `get_job` / `cancel_job` work end-to-end
-- [ ] plugin integrity mismatch refused under strict
-- [ ] disconnect/budget alerts invoked (unit-covered)
+- [x] `deckagent onboard` exits 0 on healthy local stack
+- [x] `deckagent smoke` passes against live Worker+daemon
+- [x] write/edit confirmation shows unified diff
+- [x] `deckagent device revoke` + UI revoke path work
+- [x] `start_job` / `get_job` / `cancel_job` work end-to-end
+- [x] plugin integrity mismatch refused under strict
+- [x] disconnect/budget alerts invoked (unit-covered)
 - [x] `npm run e2e:mcp` green (2026-07-16 local run; see W5.8 acceptance note)
-- [ ] All package tests + security:smoke + pack:smoke green
+- [x] All package tests + security:smoke + pack:smoke green
 
 ---
 

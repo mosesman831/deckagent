@@ -83,7 +83,8 @@ See [`SECURITY.md`](SECURITY.md) and [`docs/SECURITY_ENFORCEMENT_SPEC.md`](docs/
 | [`docs/WAVE3_FEATURE_SPEC.md`](docs/WAVE3_FEATURE_SPEC.md) | Implemented Wave 3 features F1-F10 |
 | [`docs/WAVE3_MILESTONE_34_SPEC.md`](docs/WAVE3_MILESTONE_34_SPEC.md) | Implemented F8-F10 device, plugin, and watchdog details |
 | [`docs/SECURITY_ENFORCEMENT_SPEC.md`](docs/SECURITY_ENFORCEMENT_SPEC.md) | Implemented Wave 4 hard security enforcement |
-| [`docs/PRODUCTION_READINESS_SPEC.md`](docs/PRODUCTION_READINESS_SPEC.md) | Production-readiness checklist and remaining P2 gaps |
+| [`docs/PRODUCTION_READINESS_SPEC.md`](docs/PRODUCTION_READINESS_SPEC.md) | Production-readiness P0–P2 hardening (implemented) |
+| [`docs/WAVE5_OPERATOR_SPEC.md`](docs/WAVE5_OPERATOR_SPEC.md) | Wave 5 onboard/smoke, diffs, jobs, revoke, integrity, e2e |
 | [`README.md`](README.md) | Operator-facing install, feature status, and usage guide |
 | [`SECURITY.md`](SECURITY.md) | Vulnerability reporting, hardening checklist, and residual risks |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release notes and shipped-change summary |
@@ -92,14 +93,13 @@ See [`SECURITY.md`](SECURITY.md) and [`docs/SECURITY_ENFORCEMENT_SPEC.md`](docs/
 
 Implemented:
 
-- P0 hardening: real `sandbox_fs` wrapping/fail-closed behavior, restore target policy re-checks, strict defaults, publishable packages, CSRF/UI token protections.
-- P1 hardening: plugin child-process isolation, browser host enforcement, soft MCP policy errors, Worker rate limits, `auth_ok` compatibility handling, safer uninstall, 10MB x 5 rotation, device API validation, CI pack smoke, strict allowlist docs.
-- P2 operator readiness shipped in this branch: release workflow and changelog, canonical docs sync, and `deckagent token rotate [--deploy]`.
+- P0–P2 hardening: real `sandbox_fs`, restore path checks, strict defaults, publishable packages, CSRF/UI tokens, plugin isolation, browser host enforcement, soft MCP errors, rate limits, safer uninstall, rotation, metrics, abort signals, release workflow, token rotate.
+- Wave 5 operator experience: `deckagent onboard` / `smoke`, confirmation diffs, device revoke, background jobs, plugin integrity pins, ops alerts, `npm run e2e:mcp`.
 
-Not shipped:
+Not shipped (intentionally deferred):
 
-- PR2.2 metrics counters/endpoints.
-- PR2.5 best-effort abort signals for long-running tools.
-- ChatGPT OAuth connector flow.
+- ChatGPT OAuth connector flow (Bearer-only by design today).
 - Chrome Web Store publication for the experimental v2 extension.
 - Multi-tenant SaaS, team billing, or hosted relay mode.
+- Full OS computer-use suite beyond Playwright page tools.
+- Signed native installers (Homebrew / pkg / msi).
