@@ -1,6 +1,6 @@
 # DeckAgent — Next Features Plan & Spec (Wave 3)
 
-> Status: **F1–F7 IMPLEMENTED** (Wave 3.1–3.3). F8–F10 still stretch.  
+> Status: **F1–F10 IMPLEMENTED** (Wave 3.1–3.4). See also `WAVE3_MILESTONE_34_SPEC.md` and Wave 4 `SECURITY_ENFORCEMENT_SPEC.md`.  
 > Assumes Wave 1 (core bridge) + Wave 2 (production readiness + audit/allowlist/packaging/prompts) are working.
 
 ---
@@ -36,9 +36,9 @@ Non-goals for Wave 3:
 | F5 | **Local control UI** (`127.0.0.1:9150`) | Approvals queue, live status, recent audit, policy toggles | **P1 ✅** |
 | F6 | **Rate limits & budgets** | Cap tool calls / shell minutes / bytes written per hour | **P1 ✅** |
 | F7 | **True Streamable HTTP SSE progress** | Long builds stream to MCP clients, not only buffered `tool_progress` | **P1 ✅** |
-| F8 | **Device tools** (`list_devices`, sticky device) | Multi-machine setups stop being footguns | **P1** |
-| F9 | **Custom tool plugins** | User drops a JS/TS tool into `~/.deckagent/plugins` | **P2** |
-| F10 | **Scheduled / watchdog health** | Daemon self-heals + `deckagent doctor --watch` | **P2** |
+| F8 | **Device tools** (`list_devices`, sticky device) | Multi-machine setups stop being footguns | **P1 ✅** |
+| F9 | **Custom tool plugins** | User drops a JS/TS tool into `~/.deckagent/plugins` | **P2 ✅** |
+| F10 | **Scheduled / watchdog health** | Daemon self-heals + `deckagent doctor --watch` | **P2 ✅** |
 
 **Recommended Wave 3 ship set:** F1–F6 (+ F7 if time). F8–F10 follow immediately after.
 
