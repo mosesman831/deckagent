@@ -257,6 +257,113 @@ async function main() {
     "tools/list returns 18 tools"
   );
 
+  // --- 5b. MCP prompts + instructions ---
+  console.log("\n5b. MCP prompts / instructions");
+  const initRes = await worker.fetch(
+    new Request(url("/mcp"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${API_TOKEN}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "initialize",
+        params: {},
+      }),
+    }),
+    env
+  );
+  const initBody = (await initRes.json()) as {
+    result?: {
+      instructions?: string;
+      capabilities?: { prompts?: unknown; tools?: unknown };
+    };
+  };
+  assert(
+    typeof initBody.result?.instructions === "string" &&
+      initBody.result.instructions.includes("DeckAgent"),
+    "initialize includes DeckAgent instructions"
+  );
+  assert(
+    initBody.result?.capabilities?.prompts !== undefined,
+    "initialize advertises prompts capability"
+  );
+
+  const promptsRes = await worker.fetch(
+    new Request(url("/mcp"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${API_TOKEN}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "prompts/list",
+      }),
+    }),
+    env
+  );
+  const promptsBody = (await promptsRes.json()) as {
+    result?: { prompts?: Array<{ name: string }> };
+  };
+  assert(
+    Array.isArray(promptsBody.result?.prompts) &&
+      promptsBody.result!.prompts!.some((p) => p.name === "deckagent_system"),
+    "prompts/list includes deckagent_system"
+  );
+
+  const promptGetRes = await worker.fetch(
+    new Request(url("/mcp"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${API_TOKEN}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 4,
+        method: "prompts/get",
+        params: {
+          name: "deckagent_system",
+          arguments: { task: "list files in /tmp" },
+        },
+      }),
+    }),
+    env
+  );
+  const promptGetBody = (await promptGetRes.json()) as {
+    result?: { messages?: Array<{ content?: { text?: string } }> };
+  };
+  const promptText = promptGetBody.result?.messages?.[0]?.content?.text ?? "";
+  assert(promptText.includes("DeckAgent"), "prompts/get returns identity text");
+  assert(promptText.includes("list files in /tmp"), "prompts/get includes task arg");
+
+  const resourcesRes = await worker.fetch(
+    new Request(url("/mcp"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${API_TOKEN}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 5,
+        method: "resources/list",
+      }),
+    }),
+    env
+  );
+  const resourcesBody = (await resourcesRes.json()) as {
+    result?: { resources?: unknown[] };
+  };
+  assert(
+    Array.isArray(resourcesBody.result?.resources),
+    "resources/list returns empty array"
+  );
+
   // CORS: Origin echoed, not *
   console.log("\n6. CORS");
   const corsRes = await worker.fetch(

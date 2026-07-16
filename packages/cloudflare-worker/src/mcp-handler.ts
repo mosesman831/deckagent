@@ -1,9 +1,16 @@
 import type { Env } from "./types.js";
 import { JsonRpcCode } from "./types.js";
 import { TOOL_CATALOG, TOOL_NAMES } from "./tool-catalog.js";
+import {
+  MCP_INSTRUCTIONS,
+  PROMPT_CATALOG,
+  getPromptMessages,
+  isKnownPrompt,
+} from "./prompt-catalog.js";
 import { resolveTargetDeviceId } from "./device-registry.js";
 
 export { TOOL_CATALOG as tools } from "./tool-catalog.js";
+export { PROMPT_CATALOG, MCP_INSTRUCTIONS } from "./prompt-catalog.js";
 
 type JsonRpcId = string | number | null;
 
@@ -124,8 +131,13 @@ export async function handleMcpRequest(
       id,
       {
         protocolVersion: "2024-11-05",
-        capabilities: { tools: {} },
+        capabilities: {
+          tools: {},
+          prompts: {},
+          resources: {},
+        },
         serverInfo: { name: env.APP_NAME || "DeckAgent", version: "0.1.0" },
+        instructions: MCP_INSTRUCTIONS,
       },
       cors
     );
@@ -138,6 +150,42 @@ export async function handleMcpRequest(
 
   if (method === "tools/list") {
     return jsonRpcResponse(id, { tools: TOOL_CATALOG }, cors);
+  }
+
+  if (method === "prompts/list") {
+    return jsonRpcResponse(id, { prompts: PROMPT_CATALOG }, cors);
+  }
+
+  if (method === "prompts/get") {
+    const promptName = body.params?.name;
+    const promptArgs =
+      (body.params?.arguments as Record<string, unknown> | undefined) ?? {};
+    if (!promptName || !isKnownPrompt(promptName)) {
+      return jsonRpcError(
+        id,
+        "METHOD_NOT_FOUND",
+        `Prompt '${promptName ?? ""}' not found`,
+        {
+          rpcCode: JsonRpcCode.INVALID_PARAMS,
+          httpStatus: 404,
+          cors,
+        }
+      );
+    }
+    const prompt = getPromptMessages(promptName, promptArgs);
+    if (!prompt) {
+      return jsonRpcError(id, "METHOD_NOT_FOUND", `Prompt '${promptName}' not found`, {
+        rpcCode: JsonRpcCode.INVALID_PARAMS,
+        httpStatus: 404,
+        cors,
+      });
+    }
+    return jsonRpcResponse(id, prompt, cors);
+  }
+
+  if (method === "resources/list") {
+    // No static resources yet — return empty list so playgrounds don't 404.
+    return jsonRpcResponse(id, { resources: [] }, cors);
   }
 
   if (method === "tools/call") {

@@ -6,6 +6,12 @@ import type {
 } from "./types.js";
 import { JsonRpcCode } from "./types.js";
 import { TOOL_CATALOG, TOOL_NAMES } from "./tool-catalog.js";
+import {
+  MCP_INSTRUCTIONS,
+  PROMPT_CATALOG,
+  getPromptMessages,
+  isKnownPrompt,
+} from "./prompt-catalog.js";
 import { authenticateDevice, updateDeviceStatus } from "./device-registry.js";
 
 // Allow time for local confirmation UX (~90s) plus tool execution headroom.
@@ -265,13 +271,51 @@ export class TunnelDO implements DurableObject {
     if (method === "initialize") {
       return jsonRpcResponse(id, {
         protocolVersion: "2024-11-05",
-        capabilities: { tools: {} },
+        capabilities: {
+          tools: {},
+          prompts: {},
+          resources: {},
+        },
         serverInfo: { name: "DeckAgent", version: "0.1.0" },
+        instructions: MCP_INSTRUCTIONS,
       });
     }
 
     if (method === "tools/list") {
       return jsonRpcResponse(id, { tools: TOOL_CATALOG });
+    }
+
+    if (method === "prompts/list") {
+      return jsonRpcResponse(id, { prompts: PROMPT_CATALOG });
+    }
+
+    if (method === "prompts/get") {
+      const promptName = body.params?.name;
+      const promptArgs = body.params?.arguments ?? {};
+      if (!promptName || !isKnownPrompt(promptName)) {
+        return jsonRpcError(
+          id,
+          "METHOD_NOT_FOUND",
+          `Prompt '${promptName ?? ""}' not found`,
+          JsonRpcCode.INVALID_PARAMS,
+          404
+        );
+      }
+      const prompt = getPromptMessages(promptName, promptArgs);
+      if (!prompt) {
+        return jsonRpcError(
+          id,
+          "METHOD_NOT_FOUND",
+          `Prompt '${promptName}' not found`,
+          JsonRpcCode.INVALID_PARAMS,
+          404
+        );
+      }
+      return jsonRpcResponse(id, prompt);
+    }
+
+    if (method === "resources/list") {
+      return jsonRpcResponse(id, { resources: [] });
     }
 
     if (method === "tools/call") {
@@ -323,6 +367,31 @@ export class TunnelDO implements DurableObject {
         this.pendingTools.set(requestId, {
           resolve: (value) => {
             if (value.type === "tool_error") {
+              // Policy / confirmation / validation failures should be normal
+              // MCP tool results (isError) so playgrounds and LLMs can read them.
+              const softCodes = new Set([
+                "POLICY_BLOCKED",
+                "CONFIRMATION_REQUIRED",
+                "CONFIRMATION_DENIED",
+                "ACCESS_DENIED",
+                "COMMAND_BLOCKED",
+                "TOOL_NOT_FOUND",
+                "INVALID_ARGUMENTS",
+              ]);
+              if (softCodes.has(value.error.code)) {
+                resolve(
+                  jsonRpcResponse(id, {
+                    content: [
+                      {
+                        type: "text",
+                        text: `[${value.error.code}] ${value.error.message}`,
+                      },
+                    ],
+                    isError: true,
+                  })
+                );
+                return;
+              }
               const http =
                 value.error.code === "DEVICE_OFFLINE" ? 503 : 500;
               resolve(
