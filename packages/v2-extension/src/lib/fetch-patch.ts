@@ -8,7 +8,22 @@ import type {
 } from "../adapters/types.js";
 import { ADAPTERS } from "../adapters/index.js";
 import { appendToolResult, extractToolCallsFor } from "../adapters/tools.js";
-import { MAIN_WORLD_SOURCE, BRIDGE_SOURCE, type BridgeOutbound } from "./messages.js";
+import {
+  AUTO_CONTINUE_DEBOUNCE_MS,
+  type AutoContinueState,
+  type CachedChatRequest,
+  createAutoContinueState,
+  decideAutoContinue,
+  hasMessagesArray,
+  recordAutoContinue,
+  resetAutoContinue
+} from "./auto-continue.js";
+import {
+  MAIN_WORLD_SOURCE,
+  BRIDGE_SOURCE,
+  type BridgeOutbound,
+  type ToolOverlayStatus
+} from "./messages.js";
 
 const REQUEST_BODY_LIMIT = 10 * 1024 * 1024; // 10 MiB
 
@@ -22,8 +37,14 @@ declare global {
   interface Window {
     __deckagent_injected?: boolean;
     __deckagent_pending_results?: PendingToolResult[];
+    __deckagent_last_request?: CachedChatRequest | null;
+    __deckagent_auto_continue?: AutoContinueState;
   }
 }
+
+/** Set while an auto-continue fetch is in flight so we don't reset the turn counter. */
+let autoContinueInflight = false;
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function generateId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -71,6 +92,24 @@ export function headersToRecord(headers: Headers): Record<string, string> {
 
 export function pickAdapter(url: string, adapters: readonly ChatAdapter[]): ChatAdapter | undefined {
   return adapters.find((adapter) => adapter.match(url));
+}
+
+function getAutoContinueState(): AutoContinueState {
+  if (!window.__deckagent_auto_continue) {
+    window.__deckagent_auto_continue = createAutoContinueState();
+  }
+  return window.__deckagent_auto_continue;
+}
+
+function cacheLastRequest(request: InterceptedRequest): void {
+  window.__deckagent_last_request = {
+    url: request.url,
+    method: request.method,
+    headers: { ...request.headers },
+    body: request.body,
+    adapterType: request.adapterType,
+    requestId: request.id
+  };
 }
 
 function drainPendingResults(adapterType: string): string[] {
@@ -145,6 +184,18 @@ export function installFetchMonkeyPatch(context: FetchMonkeyPatchContext): () =>
       return originalFetch(input, init);
     }
 
+    const state = getAutoContinueState();
+    // Peek at the outbound body before transforms so we only reset on real chat turns.
+    const rawBody = await readRequestBody(init?.body ?? null);
+    if (autoContinueInflight) {
+      recordAutoContinue(state);
+    } else if (
+      (init?.method ?? "GET").toUpperCase() === "POST" &&
+      hasMessagesArray(rawBody)
+    ) {
+      resetAutoContinue(state);
+    }
+
     let request = await buildInterceptedRequest(url, init);
     request.adapterType = adapter.name;
 
@@ -152,11 +203,13 @@ export function installFetchMonkeyPatch(context: FetchMonkeyPatchContext): () =>
       request = await adapter.transformRequest(request);
     }
 
-    // Fold any pending tool results into the outbound request body.
+    // Fold any pending tool results into the outbound request body (manual fallback path).
     request = {
       ...request,
       body: applyPendingResults(request.body, adapter.name, appendToolResult[adapter.name])
     };
+
+    cacheLastRequest(request);
 
     report({
       id: generateId(),
@@ -185,6 +238,12 @@ export function installFetchMonkeyPatch(context: FetchMonkeyPatchContext): () =>
 
     const toolCalls: ToolCall[] | null = extractToolCallsFor(adapter.name, interceptedResponse.body);
 
+    if (toolCalls && toolCalls.length > 0) {
+      showOverlayStatus("running", "Running tool…");
+    } else if (autoContinueInflight) {
+      showOverlayStatus("done", "Done");
+    }
+
     report({
       id: generateId(),
       type: "response",
@@ -206,6 +265,10 @@ export function installFetchMonkeyPatch(context: FetchMonkeyPatchContext): () =>
 
   return () => {
     window.fetch = originalFetch;
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
   };
 }
 
@@ -228,49 +291,155 @@ function storePendingResult(result: PendingToolResult): void {
   window.__deckagent_pending_results.push(result);
 }
 
-function showToolResultOverlay(results: BridgeOutbound & { type: "tool_result" }): void {
-  try {
-    const existing = document.getElementById("deckagent-tool-overlay");
-    if (existing) existing.remove();
+function queueResultsForManualSend(
+  data: BridgeOutbound & { type: "tool_result" },
+  reason?: string
+): void {
+  for (const item of data.results) {
+    const content = item.ok
+      ? (item.content ?? "")
+      : `Error executing ${item.name}: ${item.error ?? "unknown"}`;
+    storePendingResult({
+      requestId: data.requestId,
+      adapterType: data.adapterType,
+      content: `${item.name}: ${content}`
+    });
+  }
+  showToolResultOverlay(data, {
+    status: anyFailed(data.results) ? "error" : "queued",
+    hint: reason
+      ? `${reason}. Results queued for the next chat request.`
+      : "Results will be appended to the next chat request."
+  });
+}
 
-    const panel = document.createElement("div");
-    panel.id = "deckagent-tool-overlay";
-    panel.setAttribute(
-      "style",
-      [
-        "position:fixed",
-        "bottom:16px",
-        "right:16px",
-        "z-index:2147483646",
-        "max-width:420px",
-        "max-height:40vh",
-        "overflow:auto",
-        "background:#0f172a",
-        "color:#e2e8f0",
-        "border:1px solid #38bdf8",
-        "border-radius:8px",
-        "padding:12px 14px",
-        "font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace",
-        "box-shadow:0 8px 24px rgba(0,0,0,.35)"
-      ].join(";")
-    );
+function anyFailed(results: Array<{ ok: boolean }>): boolean {
+  return results.some((r) => !r.ok);
+}
+
+const OVERLAY_STYLES = [
+  "position:fixed",
+  "bottom:16px",
+  "right:16px",
+  "z-index:2147483646",
+  "max-width:420px",
+  "max-height:40vh",
+  "overflow:auto",
+  "background:#0f172a",
+  "color:#e2e8f0",
+  "border:1px solid #38bdf8",
+  "border-radius:8px",
+  "padding:12px 14px",
+  "font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace",
+  "box-shadow:0 8px 24px rgba(0,0,0,.35)"
+].join(";");
+
+function scheduleOverlayAutoHide(panel: HTMLElement, ms: number): void {
+  setTimeout(() => {
+    if (panel.isConnected) panel.remove();
+  }, ms);
+}
+
+function ensureOverlayPanel(): HTMLElement | null {
+  try {
+    let panel = document.getElementById("deckagent-tool-overlay");
+    if (!panel) {
+      panel = document.createElement("div");
+      panel.id = "deckagent-tool-overlay";
+      panel.setAttribute("style", OVERLAY_STYLES);
+      document.documentElement.appendChild(panel);
+    }
+    return panel;
+  } catch {
+    return null;
+  }
+}
+
+function statusLabel(status: ToolOverlayStatus): string {
+  switch (status) {
+    case "running":
+      return "Running tool…";
+    case "continuing":
+      return "Continuing…";
+    case "done":
+      return "Done";
+    case "error":
+      return "Error";
+    case "queued":
+      return "Queued";
+    default:
+      return status;
+  }
+}
+
+export function showOverlayStatus(status: ToolOverlayStatus, message?: string): void {
+  try {
+    const panel = ensureOverlayPanel();
+    if (!panel) return;
+
+    panel.replaceChildren();
 
     const title = document.createElement("div");
-    title.textContent = "DeckAgent tool results";
+    title.textContent = `DeckAgent · ${statusLabel(status)}`;
+    title.setAttribute("style", "font-weight:600;margin-bottom:8px;color:#38bdf8");
+    panel.appendChild(title);
+
+    if (message) {
+      const body = document.createElement("div");
+      body.textContent = message;
+      body.setAttribute("style", "white-space:pre-wrap;word-break:break-word;opacity:.9");
+      panel.appendChild(body);
+    }
+
+    const close = document.createElement("button");
+    close.textContent = "Dismiss";
+    close.setAttribute(
+      "style",
+      "margin-top:8px;background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:4px 8px;cursor:pointer"
+    );
+    close.addEventListener("click", () => panel.remove());
+    panel.appendChild(close);
+
+    const autoHideMs = status === "done" || status === "error" ? 8_000 : 30_000;
+    scheduleOverlayAutoHide(panel, autoHideMs);
+  } catch {
+    // DOM may be unavailable in some test environments.
+  }
+}
+
+function showToolResultOverlay(
+  results: BridgeOutbound & { type: "tool_result" },
+  opts?: { status?: ToolOverlayStatus; hint?: string }
+): void {
+  try {
+    const panel = ensureOverlayPanel();
+    if (!panel) return;
+
+    panel.replaceChildren();
+
+    const status = opts?.status ?? (anyFailed(results.results) ? "error" : "done");
+    const title = document.createElement("div");
+    title.textContent = `DeckAgent · ${statusLabel(status)}`;
     title.setAttribute("style", "font-weight:600;margin-bottom:8px;color:#38bdf8");
     panel.appendChild(title);
 
     for (const item of results.results) {
       const row = document.createElement("div");
       row.setAttribute("style", "margin-bottom:8px;white-space:pre-wrap;word-break:break-word");
-      const status = item.ok ? "ok" : "error";
+      const okLabel = item.ok ? "ok" : "error";
       const body = item.ok ? (item.content ?? "") : (item.error ?? "unknown error");
-      row.textContent = `${item.name} [${status}]\n${body.slice(0, 2000)}`;
+      row.textContent = `${item.name} [${okLabel}]\n${body.slice(0, 2000)}`;
       panel.appendChild(row);
     }
 
     const hint = document.createElement("div");
-    hint.textContent = "Results will be appended to the next chat request.";
+    hint.textContent =
+      opts?.hint ??
+      (status === "continuing"
+        ? "Continuing…"
+        : status === "queued"
+          ? "Results will be appended to the next chat request."
+          : statusLabel(status));
     hint.setAttribute("style", "opacity:.7;margin-top:4px");
     panel.appendChild(hint);
 
@@ -283,13 +452,87 @@ function showToolResultOverlay(results: BridgeOutbound & { type: "tool_result" }
     close.addEventListener("click", () => panel.remove());
     panel.appendChild(close);
 
-    document.documentElement.appendChild(panel);
-    setTimeout(() => {
-      if (panel.isConnected) panel.remove();
-    }, 60_000);
+    scheduleOverlayAutoHide(panel, 30_000);
   } catch {
     // DOM may be unavailable in some test environments.
   }
+}
+
+/**
+ * Attempt to append tool results onto the cached last request and re-fetch.
+ * Falls back to the manual pending-results queue on failure.
+ */
+export async function tryAutoResubmit(
+  data: BridgeOutbound & { type: "tool_result" }
+): Promise<"resubmitted" | "queued" | "stopped"> {
+  const state = getAutoContinueState();
+  const cached = window.__deckagent_last_request;
+
+  const decision = decideAutoContinue({
+    state,
+    results: data.results,
+    adapterType: data.adapterType || cached?.adapterType || "unknown",
+    requestBody: cached?.body
+  });
+
+  if (decision.action === "stop") {
+    // Still queue so the user can manually continue after inspecting the error.
+    queueResultsForManualSend(
+      data,
+      decision.reason === "Tool execution failed" ? "Tool error — auto-continue stopped" : decision.reason
+    );
+    return "stopped";
+  }
+
+  if (decision.action === "queue") {
+    queueResultsForManualSend(data, decision.reason);
+    return "queued";
+  }
+
+  if (!cached) {
+    queueResultsForManualSend(data, "No cached request");
+    return "queued";
+  }
+
+  showToolResultOverlay(data, {
+    status: "continuing",
+    hint: "Continuing…"
+  });
+
+  try {
+    autoContinueInflight = true;
+    const response = await window.fetch(cached.url, {
+      method: cached.method,
+      headers: cached.headers,
+      body: decision.body
+    });
+    void response;
+    return "resubmitted";
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // Re-queue so the user can still continue manually.
+    for (const content of decision.contents) {
+      storePendingResult({
+        requestId: data.requestId,
+        adapterType: data.adapterType,
+        content
+      });
+    }
+    showOverlayStatus("error", `Auto-continue failed: ${message}. Queued for next send.`);
+    return "queued";
+  } finally {
+    autoContinueInflight = false;
+  }
+}
+
+function scheduleAutoResubmit(data: BridgeOutbound & { type: "tool_result" }): void {
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
+  }
+  debounceTimer = setTimeout(() => {
+    debounceTimer = null;
+    void tryAutoResubmit(data);
+  }, AUTO_CONTINUE_DEBOUNCE_MS);
 }
 
 export function listenForBridgeResults(): () => void {
@@ -298,23 +541,24 @@ export function listenForBridgeResults(): () => void {
     const data = event.data as BridgeOutbound | undefined;
     if (!data || data.source !== BRIDGE_SOURCE) return;
 
+    if (data.type === "tool_status") {
+      showOverlayStatus(data.status, data.message);
+      return;
+    }
+
     if (data.type === "tool_result") {
-      for (const item of data.results) {
-        const content = item.ok
-          ? item.content ?? ""
-          : `Error executing ${item.name}: ${item.error ?? "unknown"}`;
-        storePendingResult({
-          requestId: data.requestId,
-          adapterType: data.adapterType,
-          content: `${item.name}: ${content}`
-        });
-      }
-      showToolResultOverlay(data);
+      scheduleAutoResubmit(data);
     }
   };
 
   window.addEventListener("message", handler);
-  return () => window.removeEventListener("message", handler);
+  return () => {
+    window.removeEventListener("message", handler);
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+  };
 }
 
 export function setupMainWorld(): () => void {

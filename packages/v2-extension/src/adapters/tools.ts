@@ -41,3 +41,8 @@ export function extractToolCallsFor(adapterType: string, body: string): ToolCall
   }
   return fn(body);
 }
+
+export function appendToolResultFor(adapterType: string, body: string, content: string): string {
+  const fn = appendToolResult[adapterType] ?? deepseekAppend;
+  return fn(body, content);
+}

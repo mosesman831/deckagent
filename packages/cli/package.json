@@ -9,17 +9,21 @@
     "deckagent": "dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "assets"
   ],
   "scripts": {
+    "bundle:assets": "node ../../scripts/bundle-cli-assets.mjs",
     "build": "tsc",
-    "test": "npm run build && node test/write-worker-config.test.mjs",
-    "prepublishOnly": "npm run build"
+    "prepack": "npm run bundle:assets && npm run build",
+    "test": "npm run build && node test/write-worker-config.test.mjs && node test/resolve-paths.test.mjs",
+    "prepublishOnly": "npm run prepack"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
+    "@deckagent/desktop-daemon": "file:../desktop-daemon",
     "zod": "^3.23.8"
   },
   "devDependencies": {

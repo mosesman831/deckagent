@@ -3,6 +3,16 @@ import { homedir } from "node:os";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname, join, resolve as resolvePath, isAbsolute, normalize, sep } from "node:path";
 
+/**
+ * Policy defaults (blocklist mode for backward compatibility):
+ * - command_mode: "blocklist" | "allowlist" (default "blocklist")
+ * - blocked_commands: used when command_mode is "blocklist"
+ * - allowed_commands: used when command_mode is "allowlist"
+ *   (substring or word-boundary match; empty list blocks all terminal commands)
+ *
+ * CLI `deckagent configure` may set command_mode/allowed_commands later;
+ * daemon defaults stay blocklist for compatibility.
+ */
 export const PolicySchema = z.object({
   version: z.number().int().default(1),
   allowed_directories: z.array(z.string()).default(["~"]),
@@ -19,6 +29,14 @@ export const PolicySchema = z.object({
     "curl|sh",
     "wget|sh",
   ]),
+  /**
+   * How terminal commands are filtered.
+   * - blocklist (default): reject if matched by blocked_commands / dangerous patterns
+   * - allowlist: only allow if matched by allowed_commands (empty = block all)
+   */
+  command_mode: z.enum(["blocklist", "allowlist"]).default("blocklist"),
+  /** Substrings or single-token patterns; used when command_mode is "allowlist". */
+  allowed_commands: z.array(z.string()).default([]),
   require_confirmation: z.array(z.string()).default([
     "execute_command",
     "write_file",
@@ -182,40 +200,79 @@ export function isCommandBlocked(
   }
 
   for (const blocked of blockedList) {
-    const entry = normalizeCommand(blocked);
-    if (!entry) continue;
-
-    // Pipe-style entries like "curl|sh" → match curl ... | sh
-    if (entry.includes("|") && !entry.includes(" ")) {
-      const parts = entry.split("|").map((p) => p.trim()).filter(Boolean);
-      if (parts.length >= 2) {
-        const left = escapeRegex(parts[0]!);
-        const right = escapeRegex(parts[parts.length - 1]!);
-        const pipePattern = new RegExp(
-          `\\b${left}\\b[\\s\\S]*\\|\\s*(?:ba|z|da)?${right}\\b`,
-        );
-        if (pipePattern.test(normalized)) {
-          return { blocked: true, matched: blocked };
-        }
-      }
-    }
-
-    // Substring check (legacy / explicit multi-word blocks)
-    if (normalized.includes(entry)) {
+    if (commandMatchesEntry(normalized, blocked)) {
       return { blocked: true, matched: blocked };
-    }
-
-    // Word-boundary for single-token blocks (avoids matching inside longer words
-    // but still catches `sudo` / `reboot` etc. as whole words)
-    if (!/\s/.test(entry) && !entry.includes("|")) {
-      const wordPattern = new RegExp(`(?:^|[^a-z0-9_])${escapeRegex(entry)}(?:[^a-z0-9_]|$)`);
-      if (wordPattern.test(normalized)) {
-        return { blocked: true, matched: blocked };
-      }
     }
   }
 
   return { blocked: false };
+}
+
+/**
+ * Allowlist matching: command must match at least one allowed_commands entry
+ * via normalized substring include or word-boundary (same helpers as blocklist).
+ * Empty allowed list → not allowed (caller should block all terminal commands).
+ */
+export function isCommandAllowed(
+  command: string,
+  allowedList: string[],
+): { allowed: boolean; matched?: string } {
+  const normalized = normalizeCommand(command);
+  if (!normalized) {
+    return { allowed: false };
+  }
+  if (allowedList.length === 0) {
+    return { allowed: false };
+  }
+
+  for (const allowed of allowedList) {
+    if (commandMatchesEntry(normalized, allowed)) {
+      return { allowed: true, matched: allowed };
+    }
+  }
+
+  return { allowed: false };
+}
+
+/**
+ * Shared entry matcher: pipe-style, substring include, or word-boundary for tokens.
+ * `normalizedCommand` must already be normalizeCommand()'d.
+ */
+function commandMatchesEntry(normalizedCommand: string, rawEntry: string): boolean {
+  const entry = normalizeCommand(rawEntry);
+  if (!entry) return false;
+
+  // Pipe-style entries like "curl|sh" → match curl ... | sh
+  if (entry.includes("|") && !entry.includes(" ")) {
+    const parts = entry.split("|").map((p) => p.trim()).filter(Boolean);
+    if (parts.length >= 2) {
+      const left = escapeRegex(parts[0]!);
+      const right = escapeRegex(parts[parts.length - 1]!);
+      const pipePattern = new RegExp(
+        `\\b${left}\\b[\\s\\S]*\\|\\s*(?:ba|z|da)?${right}\\b`,
+      );
+      if (pipePattern.test(normalizedCommand)) {
+        return true;
+      }
+    }
+  }
+
+  // Substring check (legacy / explicit multi-word)
+  if (normalizedCommand.includes(entry)) {
+    return true;
+  }
+
+  // Word-boundary for single-token entries
+  if (!/\s/.test(entry) && !entry.includes("|")) {
+    const wordPattern = new RegExp(
+      `(?:^|[^a-z0-9_])${escapeRegex(entry)}(?:[^a-z0-9_]|$)`,
+    );
+    if (wordPattern.test(normalizedCommand)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 /**
@@ -286,13 +343,10 @@ export function checkToolAllowed(
   const argsWithDefaults = applyPathDefaults(toolName, args);
 
   const command = typeof argsWithDefaults.command === "string" ? argsWithDefaults.command : "";
-  if (command) {
-    const blockResult = isCommandBlocked(command, policy.blocked_commands);
-    if (blockResult.blocked) {
-      return {
-        allowed: false,
-        reason: `Command blocked by policy: matched '${blockResult.matched ?? "dangerous pattern"}'`,
-      };
+  if (command && TERMINAL_TOOLS.has(toolName)) {
+    const commandCheck = checkCommandPolicy(command, policy);
+    if (!commandCheck.allowed) {
+      return commandCheck;
     }
   }
 
@@ -312,6 +366,51 @@ export function checkToolAllowed(
     };
   }
 
+  return { allowed: true };
+}
+
+/**
+ * Apply command_mode (blocklist vs allowlist) to a terminal command string.
+ */
+export function checkCommandPolicy(
+  command: string,
+  policy: Policy,
+): PolicyResult {
+  if (policy.command_mode === "allowlist") {
+    if (policy.allowed_commands.length === 0) {
+      return {
+        allowed: false,
+        reason:
+          "Command blocked by policy: command_mode is allowlist but allowed_commands is empty (all terminal commands blocked)",
+      };
+    }
+    // Still reject known-dangerous patterns even in allowlist mode.
+    const dangerous = isCommandBlocked(command, []);
+    if (dangerous.blocked) {
+      return {
+        allowed: false,
+        reason: `Command blocked by policy: matched dangerous pattern '${dangerous.matched ?? "dangerous pattern"}'`,
+      };
+    }
+    const allowResult = isCommandAllowed(command, policy.allowed_commands);
+    if (!allowResult.allowed) {
+      return {
+        allowed: false,
+        reason:
+          "Command blocked by policy: command_mode is allowlist and command does not match any allowed_commands entry",
+      };
+    }
+    return { allowed: true };
+  }
+
+  // blocklist (default)
+  const blockResult = isCommandBlocked(command, policy.blocked_commands);
+  if (blockResult.blocked) {
+    return {
+      allowed: false,
+      reason: `Command blocked by policy: matched '${blockResult.matched ?? "dangerous pattern"}'`,
+    };
+  }
   return { allowed: true };
 }
 

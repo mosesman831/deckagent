@@ -11,6 +11,8 @@ export type BridgeInbound = {
   message: AdapterMessage;
 };
 
+export type ToolOverlayStatus = "running" | "continuing" | "done" | "error" | "queued";
+
 export type BridgeOutbound =
   | {
       source: typeof BRIDGE_SOURCE;
@@ -24,6 +26,13 @@ export type BridgeOutbound =
         content?: string;
         error?: string;
       }>;
+    }
+  | {
+      source: typeof BRIDGE_SOURCE;
+      type: "tool_status";
+      status: ToolOverlayStatus;
+      message?: string;
+      requestId?: string;
     }
   | {
       source: typeof BRIDGE_SOURCE;

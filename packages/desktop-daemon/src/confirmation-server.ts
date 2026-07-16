@@ -376,17 +376,18 @@ export class ConfirmationServer {
         "Approve tool execution?",
         `
         <p><strong>DeckAgent</strong> needs your approval to run a tool on this machine.</p>
-        <dl>
-          <dt>Tool</dt><dd><code>${escapeHtml(approval.tool)}</code></dd>
-          <dt>Reason</dt><dd>${escapeHtml(approval.reason)}</dd>
-          <dt>Args</dt><dd><pre>${escapeHtml(approval.argsSummary)}</pre></dd>
-          <dt>Expires</dt><dd>~${remainingSec}s</dd>
-        </dl>
+        <div class="panel">
+          <p class="tool-name">Tool: <code>${escapeHtml(approval.tool)}</code></p>
+          <p class="reason">${escapeHtml(approval.reason)}</p>
+          <p class="label">Arguments</p>
+          <pre class="args">${escapeHtml(approval.argsSummary)}</pre>
+          <p class="expires">Expires in ~${remainingSec}s</p>
+        </div>
         <form method="POST" action="/confirm/${id}/approve" style="display:inline">
-          <button type="submit" style="background:#1a7f37;color:#fff;padding:10px 18px;border:0;cursor:pointer;font-size:16px">Approve</button>
+          <button type="submit" class="btn approve">Approve</button>
         </form>
         <form method="POST" action="/confirm/${id}/deny" style="display:inline;margin-left:12px">
-          <button type="submit" style="background:#cf222e;color:#fff;padding:10px 18px;border:0;cursor:pointer;font-size:16px">Deny</button>
+          <button type="submit" class="btn deny">Deny</button>
         </form>
         `,
       ),
@@ -397,8 +398,13 @@ export class ConfirmationServer {
 function summarizeArgs(args: Record<string, unknown>): string {
   const sanitized: Record<string, unknown> = { ...args };
   delete sanitized._preconfirmed;
-  // Truncate large content fields
+  delete sanitized.preconfirmed;
+  delete sanitized.__preconfirmed;
   for (const key of Object.keys(sanitized)) {
+    if (/^(token|password|secret|api[_-]?key|authorization|bearer|credential)$/i.test(key)) {
+      sanitized[key] = "[redacted]";
+      continue;
+    }
     const value = sanitized[key];
     if (typeof value === "string" && value.length > 200) {
       sanitized[key] = value.slice(0, 200) + "…";
@@ -427,12 +433,18 @@ function htmlPage(title: string, body: string): string {
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>${escapeHtml(title)} — DeckAgent</title>
   <style>
-    body { font-family: ui-sans-serif, system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; color: #1f2328; }
-    h1 { font-size: 1.4rem; }
-    code, pre { background: #f6f8fa; padding: 2px 6px; border-radius: 4px; font-size: 0.9rem; }
-    pre { padding: 12px; overflow: auto; }
-    dt { font-weight: 600; margin-top: 12px; }
-    dd { margin: 4px 0 0 0; }
+    body { font-family: ui-sans-serif, system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; color: #1f2328; background: #f6f8fa; }
+    h1 { font-size: 1.4rem; margin-bottom: 8px; }
+    .panel { background: #fff; border: 1px solid #d0d7de; border-radius: 8px; padding: 16px 18px; margin: 16px 0 20px; }
+    .tool-name { font-size: 1.05rem; margin: 0 0 8px; }
+    .reason { color: #57606a; margin: 0 0 12px; }
+    .label { font-weight: 600; margin: 0 0 6px; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.02em; color: #57606a; }
+    code, pre.args { background: #f6f8fa; padding: 2px 6px; border-radius: 4px; font-size: 0.9rem; }
+    pre.args { padding: 12px; overflow: auto; margin: 0 0 12px; border: 1px solid #eaeef2; white-space: pre-wrap; word-break: break-word; }
+    .expires { margin: 0; color: #57606a; font-size: 0.9rem; }
+    .btn { color: #fff; padding: 10px 18px; border: 0; cursor: pointer; font-size: 16px; border-radius: 6px; }
+    .btn.approve { background: #1a7f37; }
+    .btn.deny { background: #cf222e; }
   </style>
 </head>
 <body>

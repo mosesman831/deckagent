@@ -169,26 +169,7 @@ export default defineBackground(() => {
     });
   }
 
-  async function deliverToolResultsToTab(
-    tabId: number | undefined,
-    payload: {
-      requestId: string;
-      adapterType: string;
-      results: Array<{
-        name: string;
-        args: Record<string, unknown>;
-        ok: boolean;
-        content?: string;
-        error?: string;
-      }>;
-    }
-  ): Promise<void> {
-    const message = {
-      source: BRIDGE_SOURCE,
-      type: "tool_result" as const,
-      ...payload
-    };
-
+  async function deliverToTab(tabId: number | undefined, message: Record<string, unknown>): Promise<void> {
     if (tabId !== undefined) {
       try {
         await chrome.tabs.sendMessage(tabId, message);
@@ -216,12 +197,54 @@ export default defineBackground(() => {
     }
   }
 
+  async function deliverToolResultsToTab(
+    tabId: number | undefined,
+    payload: {
+      requestId: string;
+      adapterType: string;
+      results: Array<{
+        name: string;
+        args: Record<string, unknown>;
+        ok: boolean;
+        content?: string;
+        error?: string;
+      }>;
+    }
+  ): Promise<void> {
+    await deliverToTab(tabId, {
+      source: BRIDGE_SOURCE,
+      type: "tool_result",
+      ...payload
+    });
+  }
+
+  async function deliverToolStatusToTab(
+    tabId: number | undefined,
+    payload: {
+      requestId: string;
+      status: "running" | "continuing" | "done" | "error" | "queued";
+      message?: string;
+    }
+  ): Promise<void> {
+    await deliverToTab(tabId, {
+      source: BRIDGE_SOURCE,
+      type: "tool_status",
+      ...payload
+    });
+  }
+
   async function handleToolCalls(opts: {
     requestId: string;
     adapterType: string;
     toolCalls: ToolCall[];
     tabId?: number;
   }): Promise<void> {
+    await deliverToolStatusToTab(opts.tabId, {
+      requestId: opts.requestId,
+      status: "running",
+      message: `Running tool… (${opts.toolCalls.map((c) => c.name).join(", ")})`
+    });
+
     const results: Array<{
       name: string;
       args: Record<string, unknown>;

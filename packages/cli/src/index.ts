@@ -16,6 +16,7 @@ import {
 } from './install-daemon.js';
 import { askYesNo, getConfigDir } from './configure.js';
 import { runDoctor } from './doctor.js';
+import { runTunnel } from './tunnel.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -38,6 +39,7 @@ Usage:
   deckagent daemon --stop      Stop the desktop daemon
   deckagent daemon --status    Check if the daemon is running
   deckagent logs [--follow] [--lines N]  Tail daemon logs (follows on TTY by default)
+  deckagent tunnel [--name NAME] [--url URL]  Cloudflare Tunnel to local wrangler (dev)
   deckagent doctor             Check DeckAgent health and prerequisites
   deckagent uninstall          Stop daemon and remove config
   deckagent version            Print version
@@ -59,6 +61,19 @@ function parseLogsOptions(args: string[]): { follow?: boolean; lines?: number } 
     if (!Number.isNaN(n) && n > 0) {
       options.lines = n;
     }
+  }
+  return options;
+}
+
+function parseTunnelOptions(args: string[]): { name?: string; url?: string } {
+  const options: { name?: string; url?: string } = {};
+  const nameIndex = args.indexOf('--name');
+  if (nameIndex >= 0 && args[nameIndex + 1]) {
+    options.name = args[nameIndex + 1];
+  }
+  const urlIndex = args.indexOf('--url');
+  if (urlIndex >= 0 && args[urlIndex + 1]) {
+    options.url = args[urlIndex + 1];
   }
   return options;
 }
@@ -107,6 +122,12 @@ async function main(): Promise<void> {
     case 'logs': {
       const options = parseLogsOptions(args.slice(1));
       tailLogs(options);
+      break;
+    }
+
+    case 'tunnel': {
+      const options = parseTunnelOptions(args.slice(1));
+      await runTunnel(options);
       break;
     }
 

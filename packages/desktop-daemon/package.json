@@ -8,10 +8,14 @@
   "bin": {
     "deckagent-daemon": "dist/src/index.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "start": "node dist/src/index.js",
-    "test": "npm run build && node dist/test.js"
+    "test": "npm run build && node dist/test.js",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@deckagent/mcp-server": "file:../mcp-server",

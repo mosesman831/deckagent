@@ -531,4 +531,4 @@ console.log("\nWaiting for async tests...");
 setTimeout(() => {
   console.log(`\n${total - failed}/${total} passed`);
   if (failed > 0) process.exit(1);
-}, 100);
+}, 500);

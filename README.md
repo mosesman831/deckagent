@@ -202,6 +202,41 @@ Tool results appear in a page overlay and are queued into the next chat request.
 > - The AI chat sites may update their APIs at any time, potentially breaking the extension.
 > - Tested against 191 unit/integration/stress tests. Not tested against a full Chrome Web Store review.
 
+## Named Cloudflare tunnels
+
+For local development you can expose `wrangler dev` (port 8787) with a Cloudflare Tunnel instead of deploying to workers.dev:
+
+```bash
+# Terminal 1 — local Worker
+cd packages/cloudflare-worker
+npx wrangler dev --port 8787
+
+# Terminal 2 — quick tunnel (ephemeral trycloudflare.com URL)
+deckagent tunnel
+# or: cloudflared tunnel --url http://127.0.0.1:8787
+```
+
+`deckagent tunnel` checks that `cloudflared` is installed, starts a quick tunnel by default, and reminds you of the MCP URL (`https://<tunnel-host>/mcp`) plus the API token from `~/.deckagent/config.json`.
+
+### Persistent named tunnel
+
+```bash
+cloudflared tunnel login
+cloudflared tunnel create deckagent-dev
+cloudflared tunnel route dns deckagent-dev deckagent.example.com
+deckagent tunnel --name deckagent-dev
+```
+
+Configure ingress in `~/.cloudflared/config.yml` so the named tunnel forwards to `http://127.0.0.1:8787`. Production setups should still prefer a deployed Worker on `*.workers.dev` (or a custom domain on the Worker) — tunnels are ideal for local/dev or when you need a stable hostname in front of `wrangler dev`.
+
+### Publishing the CLI (`npx deckagent`)
+
+```bash
+npm run bundle:cli   # copies Worker sources into packages/cli/assets/worker
+npm run build
+# publish @deckagent/cli (includes assets/ + depends on @deckagent/desktop-daemon)
+```
+
 ## Development
 
 ```bash
@@ -224,6 +259,22 @@ npm install
 npm run build                    # builds to .output/chrome-mv3/
 npm test                         # unit + adapter tests
 ```
+
+### Connector smoke matrix
+
+Against a live Worker (daemon online for tool steps):
+
+```bash
+cd packages/cloudflare-worker
+DECKAGENT_URL=https://your-worker.workers.dev \
+DECKAGENT_TOKEN=your-api-token \
+npm run smoke
+# or: npx tsx scripts/connector-smoke.ts --url … --token …
+```
+
+Runs initialize → notifications/initialized → tools/list → prompts → resources →
+`get_environment` → `list_directory /tmp` for client profiles `cursor`,
+`claude-desktop`, and `mcpplayground`. Prints a PASS/FAIL matrix; exits non-zero on failure.
 
 Five packages in an npm workspace:
 

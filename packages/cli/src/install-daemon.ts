@@ -1,30 +1,83 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { spawn, execSync, type ChildProcess } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { spawn, execSync, type ChildProcess } from 'node:child_process';
 import { getConfigDir, getLogDir } from './configure.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { getCliPackageRoot, getDaemonPackageCandidates } from './paths.js';
 
 const WINDOWS_TASK_NAME = 'DeckAgentDaemon';
 
 const MISSING_DAEMON_HINT =
-  'Desktop daemon package not found. Run deckagent from the DeckAgent monorepo, or install the full DeckAgent distribution so packages/desktop-daemon is available next to the CLI.';
+  'Desktop daemon package not found. Run deckagent from the DeckAgent monorepo, or install @deckagent/desktop-daemon (a dependency of @deckagent/cli) so the daemon entry is resolvable.';
 
 export interface DaemonPaths {
   packageDir: string;
   distFile: string;
 }
 
-export function resolveDaemonPaths(): DaemonPaths {
-  const packageDir = path.resolve(__dirname, '..', '..', 'desktop-daemon');
-  if (!fs.existsSync(packageDir)) {
-    throw new Error(`${MISSING_DAEMON_HINT}\nLooked for: ${packageDir}`);
+export interface ResolveDaemonOptions {
+  /** Override CLI package root (directory containing package.json). */
+  cliPackageRoot?: string;
+}
+
+function daemonDistFile(packageDir: string): string {
+  return path.join(packageDir, 'dist', 'src', 'index.js');
+}
+
+function tryResolveInstalledDaemon(): string | null {
+  try {
+    const require = createRequire(import.meta.url);
+    const pkgJsonPath = require.resolve('@deckagent/desktop-daemon/package.json');
+    return path.dirname(pkgJsonPath);
+  } catch {
+    // fall through
   }
-  const distFile = path.join(packageDir, 'dist', 'src', 'index.js');
-  return { packageDir, distFile };
+
+  try {
+    if (typeof import.meta.resolve === 'function') {
+      const resolved = import.meta.resolve('@deckagent/desktop-daemon/package.json');
+      const pkgJsonPath = resolved.startsWith('file:')
+        ? fileURLToPath(resolved)
+        : resolved;
+      return path.dirname(pkgJsonPath);
+    }
+  } catch {
+    // ignore
+  }
+
+  return null;
+}
+
+/**
+ * Resolve desktop-daemon paths.
+ * Order: monorepo sibling → installed @deckagent/desktop-daemon (createRequire) → error.
+ */
+export function resolveDaemonPaths(options: ResolveDaemonOptions = {}): DaemonPaths {
+  const cliPackageRoot = options.cliPackageRoot ?? getCliPackageRoot();
+  const tried: string[] = [];
+
+  for (const packageDir of getDaemonPackageCandidates(cliPackageRoot)) {
+    tried.push(packageDir);
+    if (fs.existsSync(packageDir)) {
+      return { packageDir, distFile: daemonDistFile(packageDir) };
+    }
+  }
+
+  const installedDir = tryResolveInstalledDaemon();
+  if (installedDir) {
+    tried.push(installedDir);
+    if (fs.existsSync(installedDir)) {
+      return { packageDir: installedDir, distFile: daemonDistFile(installedDir) };
+    }
+  } else {
+    tried.push('@deckagent/desktop-daemon (npm dependency)');
+  }
+
+  throw new Error(
+    `${MISSING_DAEMON_HINT}\nLooked for:\n${tried.map((p) => `  - ${p}`).join('\n')}`
+  );
 }
 
 export function getPidFile(): string {
@@ -45,7 +98,14 @@ export function isInstalled(): boolean {
 }
 
 export async function installPrerequisites(): Promise<void> {
-  const { packageDir } = resolveDaemonPaths();
+  const { packageDir, distFile } = resolveDaemonPaths();
+  const isMonorepoSibling = path.basename(path.dirname(packageDir)) === 'packages';
+
+  // Published npm package already ships dist/; skip rebuild unless monorepo sibling.
+  if (!isMonorepoSibling && fs.existsSync(distFile)) {
+    console.log(`Using installed daemon at ${packageDir}`);
+    return;
+  }
 
   console.log('Installing daemon dependencies...');
   execSync('npm install', { cwd: packageDir, stdio: 'inherit' });

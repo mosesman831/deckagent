@@ -189,6 +189,7 @@ export class LocalTunnelServer {
     msg: ExecuteToolMessage,
   ): Promise<void> {
     const outcome = await this.executor.execute(msg.id, msg.tool, msg.args, {
+      source: "local",
       onProgress: (chunk) => {
         this.send(ws, {
           type: "tool_progress",

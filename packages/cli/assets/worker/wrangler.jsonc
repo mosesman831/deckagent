@@ -1,0 +1,25 @@
+{
+  // KV namespace id is filled by `deckagent setup` / CLI (empty string placeholder).
+  // CLI replaces: "id": ""  with the real namespace id before deploy.
+  "name": "deckagent",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "kv_namespaces": [
+    { "binding": "DECK_KV", "id": "" }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "TUNNEL_DO", "class_name": "TunnelDO" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["TunnelDO"]
+    }
+  ],
+  "vars": {
+    "APP_NAME": "DeckAgent"
+  }
+}

@@ -6,11 +6,12 @@ import { ensurePrerequisites } from './prerequisites.js';
 import { deployWorker, type WorkerConfig } from './deploy-worker.js';
 import {
   generateConfig,
-  generateDefaultPolicy,
   writeConfigFiles,
   askYesNo,
   maskSecret,
-  getConfigDir
+  getConfigDir,
+  promptForPolicy,
+  printSecuritySummary
 } from './configure.js';
 import {
   installPrerequisites,
@@ -121,7 +122,7 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
     }
 
     const config = generateConfig(deviceId, token, workerUrl, apiToken);
-    const policy = generateDefaultPolicy();
+    const policy = await promptForPolicy();
     writeConfigFiles(config, policy);
     console.log(`Wrote config files to ${getConfigDir()}/\n`);
   }
@@ -160,6 +161,13 @@ export async function runSetup(options: SetupOptions = {}): Promise<void> {
   console.log('In ChatGPT: Settings → Custom Connectors → Add → enter the URL above');
   console.log('In Claude:   Settings → Custom Connectors → Add → enter the URL above');
   console.log(`Policy file: ${getConfigDir()}/policy.json (edit to restrict access)\n`);
+
+  try {
+    const { readPolicy } = await import('./configure.js');
+    printSecuritySummary(readPolicy());
+  } catch {
+    // Policy may be missing if setup skipped deploy without prior config.
+  }
 }
 
 export function cleanConfig(): void {

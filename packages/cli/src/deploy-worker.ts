@@ -1,10 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { getCliPackageRoot, getWorkerPackageCandidates } from './paths.js';
 
 export interface WorkerConfig {
   workerName: string;
@@ -14,7 +11,7 @@ export interface WorkerConfig {
 }
 
 const MISSING_WORKER_HINT =
-  'Cloudflare Worker package not found. Run deckagent from the DeckAgent monorepo, or install the full DeckAgent distribution so packages/cloudflare-worker is available next to the CLI.';
+  'Cloudflare Worker package not found. Run deckagent from the DeckAgent monorepo, run `npm run bundle:cli` to embed worker sources under packages/cli/assets/worker, or install a published @deckagent/cli that includes those assets.';
 
 /**
  * Replace the KV namespace id for the DECK_KV binding.
@@ -40,18 +37,31 @@ export function applyKvNamespaceId(text: string, kvNamespaceId: string): string 
   );
 }
 
-export function resolveWorkerPackageDir(): string {
-  const candidate = path.resolve(__dirname, '..', '..', 'cloudflare-worker');
-  if (!fs.existsSync(candidate)) {
-    throw new Error(`${MISSING_WORKER_HINT}\nLooked for: ${candidate}`);
+export interface ResolveWorkerOptions {
+  /** Override CLI package root (directory containing package.json / assets/). */
+  cliPackageRoot?: string;
+}
+
+/**
+ * Resolve the Cloudflare Worker package directory.
+ * Order: monorepo sibling → packages/cli/assets/worker → clear error.
+ */
+export function resolveWorkerPackageDir(options: ResolveWorkerOptions = {}): string {
+  const cliPackageRoot = options.cliPackageRoot ?? getCliPackageRoot();
+  const candidates = getWorkerPackageCandidates(cliPackageRoot);
+  const tried: string[] = [];
+
+  for (const candidate of candidates) {
+    tried.push(candidate);
+    const wranglerPath = path.join(candidate, 'wrangler.jsonc');
+    if (fs.existsSync(wranglerPath)) {
+      return candidate;
+    }
   }
-  const wranglerPath = path.join(candidate, 'wrangler.jsonc');
-  if (!fs.existsSync(wranglerPath)) {
-    throw new Error(
-      `Worker package found at ${candidate} but wrangler.jsonc is missing.\n${MISSING_WORKER_HINT}`
-    );
-  }
-  return candidate;
+
+  throw new Error(
+    `${MISSING_WORKER_HINT}\nLooked for:\n${tried.map((p) => `  - ${p}`).join('\n')}`
+  );
 }
 
 export function readWorkerConfigTemplate(): string {

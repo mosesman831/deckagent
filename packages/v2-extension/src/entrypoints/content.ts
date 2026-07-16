@@ -34,7 +34,11 @@ function setupIsolatedBridge(): () => void {
   ): boolean | void => {
     const msg = message as { type?: string; source?: string } & Record<string, unknown>;
 
-    if (msg?.type === "tool_result" || msg?.source === BRIDGE_SOURCE) {
+    if (
+      msg?.type === "tool_result" ||
+      msg?.type === "tool_status" ||
+      msg?.source === BRIDGE_SOURCE
+    ) {
       window.postMessage(
         {
           source: BRIDGE_SOURCE,

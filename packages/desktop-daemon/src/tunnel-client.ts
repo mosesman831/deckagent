@@ -2,6 +2,7 @@ import WebSocket from "ws";
 import type { Config } from "./config.js";
 import type { Logger } from "./logger.js";
 import type { ToolExecutor } from "./tool-executor.js";
+import { DAEMON_VERSION, PROTOCOL_VERSION } from "./version.js";
 
 interface ExecuteToolMessage {
   type: "execute_tool";
@@ -121,6 +122,8 @@ export class TunnelClient {
       type: "auth",
       device_id: this.config.device_id,
       token: this.config.token,
+      daemon_version: DAEMON_VERSION,
+      protocol_version: PROTOCOL_VERSION,
     });
   }
 
@@ -322,6 +325,7 @@ export class TunnelClient {
 
   private async executeTool(msg: ExecuteToolMessage): Promise<void> {
     const outcome = await this.executor.execute(msg.id, msg.tool, msg.args, {
+      source: "tunnel",
       onProgress: (chunk) => {
         this.send({
           type: "tool_progress",

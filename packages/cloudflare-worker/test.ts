@@ -12,6 +12,11 @@ import {
 import { verifyApiToken } from "./src/auth.js";
 import { TOOL_CATALOG, TOOL_NAMES } from "./src/tool-catalog.js";
 import { tools as mcpHandlerTools } from "./src/mcp-handler.js";
+import {
+  checkProtocolVersion,
+  MIN_PROTOCOL_VERSION,
+  WORKER_VERSION,
+} from "./src/protocol.js";
 
 const API_TOKEN = "test-api-token-secret";
 
@@ -279,6 +284,11 @@ async function main() {
     result?: {
       instructions?: string;
       capabilities?: { prompts?: unknown; tools?: unknown };
+      serverInfo?: {
+        name?: string;
+        version?: string;
+        metadata?: { minProtocolVersion?: number };
+      };
     };
   };
   assert(
@@ -289,6 +299,15 @@ async function main() {
   assert(
     initBody.result?.capabilities?.prompts !== undefined,
     "initialize advertises prompts capability"
+  );
+  assert(
+    initBody.result?.serverInfo?.version === WORKER_VERSION,
+    `initialize serverInfo.version === ${WORKER_VERSION}`
+  );
+  assert(
+    initBody.result?.serverInfo?.metadata?.minProtocolVersion ===
+      MIN_PROTOCOL_VERSION,
+    "initialize serverInfo.metadata.minProtocolVersion"
   );
 
   const promptsRes = await worker.fetch(
@@ -419,6 +438,49 @@ async function main() {
   await updateDeviceStatus(env, deviceId, "online");
   const online = await listOnlineDevices(env);
   assert(online.length === 2, `two online devices (got ${online.length})`);
+
+  // --- 10. Protocol version handshake helper ---
+  console.log("\n10. Protocol version handshake");
+  const missing = checkProtocolVersion(undefined);
+  assert(missing.ok === true, "missing protocol_version accepted");
+  assert(
+    missing.ok && missing.warning === "upgrade_daemon",
+    "missing protocol_version → upgrade_daemon warning"
+  );
+  const current = checkProtocolVersion(MIN_PROTOCOL_VERSION);
+  assert(
+    current.ok === true && !current.warning,
+    "current protocol ok"
+  );
+  const higher = checkProtocolVersion(MIN_PROTOCOL_VERSION + 1);
+  assert(higher.ok === true, "higher protocol_version accepted");
+  const tooOld = checkProtocolVersion(MIN_PROTOCOL_VERSION - 1);
+  assert(tooOld.ok === false, "below MIN rejected");
+  assert(
+    !tooOld.ok && tooOld.reason === "protocol_mismatch",
+    "below MIN → protocol_mismatch"
+  );
+  assert(
+    typeof WORKER_VERSION === "string" && WORKER_VERSION.length > 0,
+    `WORKER_VERSION set (${WORKER_VERSION})`
+  );
+  // auth_ok shape contract (unit-level, no WS)
+  const authOkShape = {
+    type: "auth_ok" as const,
+    session_id: "sess-1",
+    worker_version: WORKER_VERSION,
+    min_protocol_version: MIN_PROTOCOL_VERSION,
+    server_time: Date.now(),
+    warning: "upgrade_daemon" as const,
+  };
+  assert(
+    authOkShape.session_id.length > 0 &&
+      authOkShape.worker_version === WORKER_VERSION &&
+      authOkShape.min_protocol_version === MIN_PROTOCOL_VERSION &&
+      typeof authOkShape.server_time === "number" &&
+      authOkShape.warning === "upgrade_daemon",
+    "auth_ok shape includes session_id, worker_version, min_protocol_version, server_time, warning"
+  );
 
   console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
   if (failed > 0) process.exit(1);
