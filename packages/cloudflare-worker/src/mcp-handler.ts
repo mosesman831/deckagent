@@ -331,15 +331,20 @@ export async function handleMcpRequest(
       },
     });
 
+    // Forward Accept so the DO can choose SSE vs JSON for execute_command_stream.
+    const accept = request.headers.get("Accept") ?? "application/json";
     const doResponse = await stub.fetch(
       new Request("https://tunnel-do/mcp", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Accept: accept,
+        },
         body: forwardBody,
       })
     );
 
-    // Ensure CORS headers on the proxied response.
+    // Ensure CORS headers on the proxied response (preserve Content-Type for SSE).
     const headers = new Headers(doResponse.headers);
     for (const [k, v] of Object.entries(cors)) {
       headers.set(k, v);

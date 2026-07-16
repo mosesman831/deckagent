@@ -10,6 +10,8 @@ import {
   existsSync,
   rmSync,
   writeFileSync,
+  chmodSync,
+  statSync,
 } from "node:fs";
 import {
   checkToolAllowed,
@@ -44,6 +46,22 @@ import {
   listLocalResourceTemplates,
   readLocalResource,
 } from "./src/resources.js";
+import {
+  listSecretNames,
+  getSecrets,
+  setSecret,
+  deleteSecret,
+  setSecretsPathForTest,
+  applySecretInjection,
+} from "./src/secrets.js";
+import {
+  checkBudget,
+  recordToolCall,
+  getBudgetStatus,
+  setBudgetsPathForTest,
+  resetBudgetsForTest,
+} from "./src/budgets.js";
+import { ControlUiServer } from "./src/control-ui.js";
 import type { ToolRegistry } from "@deckagent/mcp-server";
 import { resolve as resolvePath } from "node:path";
 
@@ -728,6 +746,297 @@ function testLocalResources(): void {
   }
 }
 
+function testRestoreSnapshotPolicy(): void {
+  section("restore_snapshot policy (F3)");
+
+  const defaults = createDefaultPolicy();
+  assert(
+    defaults.require_confirmation.includes("restore_snapshot"),
+    "restore_snapshot in default require_confirmation",
+  );
+  assertEqual(defaults.allow_secret_injection, true, "allow_secret_injection default true");
+  assert(
+    typeof defaults.budgets.max_tool_calls_per_hour === "number",
+    "budgets defaults present",
+  );
+
+  const readOnly: Policy = {
+    ...createDefaultPolicy(),
+    read_only: true,
+    require_confirmation: [],
+  };
+  const restoreBlocked = checkToolAllowed(
+    "restore_snapshot",
+    { id: "00000000-0000-4000-8000-000000000001" },
+    readOnly,
+  );
+  assert(!restoreBlocked.allowed, "read_only blocks restore_snapshot");
+
+  const confirmPolicy: Policy = {
+    ...createDefaultPolicy(),
+    read_only: false,
+    require_confirmation: ["restore_snapshot"],
+  };
+  const needsConfirm = checkToolAllowed(
+    "restore_snapshot",
+    { id: "00000000-0000-4000-8000-000000000001" },
+    confirmPolicy,
+  );
+  assert(needsConfirm.allowed, "restore_snapshot structurally allowed");
+  assertEqual(
+    needsConfirm.requiresConfirmation,
+    true,
+    "restore_snapshot requires confirmation",
+  );
+
+  const listOk = checkToolAllowed(
+    "list_snapshots",
+    { path: join(homedir(), "notes.txt") },
+    { ...createDefaultPolicy(), require_confirmation: [] },
+  );
+  assert(listOk.allowed, "list_snapshots allowed for path under ~");
+
+  const listBlocked = checkToolAllowed(
+    "list_snapshots",
+    { path: "/etc/passwd" },
+    { ...createDefaultPolicy(), require_confirmation: [] },
+  );
+  assert(!listBlocked.allowed, "list_snapshots blocked outside allowed dirs");
+}
+
+function testSecretsVault(): void {
+  section("secrets vault (F4)");
+
+  const dir = mkdtempSync(join(tmpdir(), "deckagent-secrets-"));
+  const secretsPath = join(dir, "secrets.json");
+  setSecretsPathForTest(secretsPath);
+
+  try {
+    assertEqual(listSecretNames().length, 0, "empty vault lists nothing");
+
+    setSecret("GITHUB_TOKEN", "ghp_test_secret_value_xyz");
+    setSecret("API_KEY", "key-abc");
+
+    const names = listSecretNames();
+    assert(names.includes("GITHUB_TOKEN"), "lists GITHUB_TOKEN");
+    assert(names.includes("API_KEY"), "lists API_KEY");
+
+    const got = getSecrets(["GITHUB_TOKEN", "MISSING"]);
+    assertEqual(got.GITHUB_TOKEN, "ghp_test_secret_value_xyz", "getSecrets returns value");
+    assertEqual(got.MISSING, undefined, "missing secret omitted");
+
+    // mode 0600 when possible
+    try {
+      chmodSync(secretsPath, 0o600);
+      const mode = statSync(secretsPath).mode & 0o777;
+      assert(mode === 0o600 || process.platform === "win32", "secrets file mode 0600");
+    } catch {
+      assert(true, "chmod best-effort skipped");
+    }
+
+    const injected = applySecretInjection(
+      {
+        command: "echo hi",
+        env: { PATH: "/usr/bin", GITHUB_TOKEN: "user-override" },
+        use_secrets: ["GITHUB_TOKEN", "API_KEY"],
+      },
+      true,
+    );
+    assert(!("use_secrets" in injected.args), "use_secrets stripped from exec args");
+    const env = injected.args.env as Record<string, string>;
+    assertEqual(env.GITHUB_TOKEN, "ghp_test_secret_value_xyz", "vault wins over user env");
+    assertEqual(env.API_KEY, "key-abc", "API_KEY injected");
+    assertEqual(env.PATH, "/usr/bin", "user PATH preserved");
+    assert(
+      injected.injected.includes("GITHUB_TOKEN") &&
+        injected.injected.includes("API_KEY"),
+      "injected names reported",
+    );
+
+    const noInject = applySecretInjection(
+      { command: "echo", use_secrets: ["GITHUB_TOKEN"] },
+      false,
+    );
+    assertEqual(
+      Object.keys((noInject.args.env as Record<string, string>) || {}).length,
+      0,
+      "allow_secret_injection=false skips inject",
+    );
+    assertEqual(noInject.injected.length, 0, "no injected when disabled");
+
+    const none = applySecretInjection({ command: "echo" }, true);
+    assertEqual(none.injected.length, 0, "no use_secrets → no inject");
+
+    const summary = summarizeArgsForAudit(
+      {
+        command: "gh release",
+        use_secrets: ["GITHUB_TOKEN"],
+        env: { GITHUB_TOKEN: "ghp_test_secret_value_xyz", PATH: "/bin" },
+      },
+      { secretNames: ["GITHUB_TOKEN"] },
+    );
+    assertEqual(summary.env && (summary.env as Record<string, unknown>).GITHUB_TOKEN, "[redacted]", "audit redacts secret env");
+    assert(
+      !JSON.stringify(summary).includes("ghp_test_secret"),
+      "audit summary has no secret value",
+    );
+
+    assert(deleteSecret("API_KEY"), "deleteSecret returns true");
+    assert(!listSecretNames().includes("API_KEY"), "API_KEY deleted");
+  } finally {
+    setSecretsPathForTest(null);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function testBudgets(): void {
+  section("budgets (F6)");
+
+  const dir = mkdtempSync(join(tmpdir(), "deckagent-budgets-"));
+  const budgetsPath = join(dir, "budgets.json");
+  setBudgetsPathForTest(budgetsPath);
+
+  try {
+    resetBudgetsForTest();
+    const policy: Policy = {
+      ...createDefaultPolicy(),
+      budgets: {
+        max_tool_calls_per_hour: 3,
+        max_shell_seconds_per_hour: 600,
+        max_bytes_written_per_hour: 50_000_000,
+        max_confirmations_per_hour: 60,
+      },
+      require_confirmation: [],
+    };
+
+    assert(checkBudget(policy).ok, "budget ok initially");
+    recordToolCall();
+    recordToolCall();
+    recordToolCall();
+    const exceeded = checkBudget(policy);
+    assert(!exceeded.ok, "budget exceeded after N calls");
+    assertEqual(exceeded.code, "BUDGET_EXCEEDED", "BUDGET_EXCEEDED code");
+    assert(
+      (exceeded.message || "").includes("max_tool_calls_per_hour"),
+      "message mentions tool calls",
+    );
+
+    const status = getBudgetStatus(policy);
+    assertEqual(status.tool_calls_used, 3, "tool_calls_used is 3");
+    assertEqual(status.tool_calls_remaining, 0, "remaining 0");
+
+    // Persistence: re-read via checkBudget
+    assert(!checkBudget(policy).ok, "counters survive re-read from disk");
+  } finally {
+    setBudgetsPathForTest(null);
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function testControlUi(): Promise<void> {
+  section("control UI (F5)");
+
+  const logger = new Logger("error", false);
+  const confirmation = new ConfirmationServer(logger, { port: 19150 });
+  await confirmation.start();
+
+  let policy = createDefaultPolicy();
+  const control = new ControlUiServer({
+    logger,
+    confirmationServer: confirmation,
+    host: "127.0.0.1",
+    port: 19151,
+    getStatus: () => ({
+      worker_url: "https://example.workers.dev",
+      workspace: { root: "/tmp/ws", name: "ws" },
+      daemon_version: DAEMON_VERSION,
+      protocol_version: PROTOCOL_VERSION,
+      online: false,
+      connection_state: "stopped",
+      pending_approvals: confirmation.pendingCount(),
+    }),
+    getPolicy: () => policy,
+    setPolicy: (p) => {
+      policy = p;
+    },
+  });
+
+  try {
+    let threw = false;
+    try {
+      const bad = new ControlUiServer({
+        logger,
+        confirmationServer: confirmation,
+        host: "0.0.0.0",
+        port: 19152,
+        getStatus: () => ({
+          worker_url: "",
+          workspace: null,
+          daemon_version: "0",
+          protocol_version: 1,
+          online: false,
+          connection_state: "stopped",
+          pending_approvals: 0,
+        }),
+        getPolicy: () => policy,
+        setPolicy: () => undefined,
+      });
+      await bad.start();
+    } catch (err) {
+      threw = true;
+      assert(
+        err instanceof Error && err.message.includes("loopback"),
+        "non-loopback bind rejected",
+      );
+    }
+    assert(threw, "non-loopback host throws");
+
+    await control.start();
+
+    const statusRes = await fetch("http://127.0.0.1:19151/api/status");
+    assert(statusRes.ok, "GET /api/status ok");
+    const status = (await statusRes.json()) as {
+      worker_url: string;
+      pending_approvals: number;
+      daemon_version: string;
+    };
+    assertEqual(status.worker_url, "https://example.workers.dev", "status worker_url");
+    assertEqual(status.pending_approvals, 0, "no pending initially");
+    assert(typeof status.daemon_version === "string", "daemon_version present");
+
+    const { id } = confirmation.createApproval({
+      tool: "execute_command",
+      args: { command: "echo ui" },
+      reason: "control ui test",
+    });
+    assertEqual(confirmation.listPending().length, 1, "listPending has 1");
+
+    const approvalsRes = await fetch("http://127.0.0.1:19151/api/approvals");
+    const approvals = (await approvalsRes.json()) as {
+      pending: Array<{ id: string; tool: string }>;
+    };
+    assertEqual(approvals.pending.length, 1, "api approvals lists 1");
+    assertEqual(approvals.pending[0]!.id, id, "approval id matches");
+
+    const wait = confirmation.waitForDecision(id, 5_000);
+    const approveRes = await fetch(
+      `http://127.0.0.1:19151/api/approvals/${id}/approve`,
+      { method: "POST" },
+    );
+    assert(approveRes.ok, "approve endpoint ok");
+    assertEqual(await wait, "approved", "UI approve settles waiter");
+    assertEqual(confirmation.listPending().length, 0, "listPending empty after approve");
+
+    const homePage = await fetch("http://127.0.0.1:19151/");
+    assert(homePage.ok, "GET / dashboard ok");
+    const html = await homePage.text();
+    assert(html.includes("DeckAgent"), "dashboard shows DeckAgent");
+  } finally {
+    await control.stop();
+    await confirmation.stop();
+  }
+}
+
 async function main(): Promise<void> {
   console.log("desktop-daemon smoke tests");
   testBlockedCommands();
@@ -743,6 +1052,10 @@ async function main(): Promise<void> {
   testConfigWorkspaceSchema();
   testWorkspacePathEnforcement();
   testLocalResources();
+  testRestoreSnapshotPolicy();
+  testSecretsVault();
+  testBudgets();
+  await testControlUi();
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) {

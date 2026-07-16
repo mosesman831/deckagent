@@ -24,6 +24,15 @@ import {
   type AuditSource,
 } from "./audit-log.js";
 import { sendDesktopNotification } from "./notify.js";
+import { applySecretInjection } from "./secrets.js";
+import {
+  checkBudget,
+  recordToolCall,
+  recordShellSeconds,
+  recordBytesWritten,
+  recordConfirmation,
+  getBudgetStatus,
+} from "./budgets.js";
 
 export interface ToolResultPayload {
   content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
@@ -148,6 +157,13 @@ export class ToolExecutor {
       this.workspace?.root ?? null,
     );
 
+    // Secret names requested (for audit redaction) — values never logged.
+    const requestedSecrets = Array.isArray(resolvedArgs.use_secrets)
+      ? resolvedArgs.use_secrets.filter(
+          (n): n is string => typeof n === "string" && n.length > 0,
+        )
+      : [];
+
     let outcome: ToolExecutionOutcome = {
       ok: false,
       code: "INTERNAL_ERROR",
@@ -171,7 +187,20 @@ export class ToolExecutor {
         return outcome;
       }
 
+      const budgetCheck = checkBudget(this.policy, {
+        forConfirmation: !!policyResult.requiresConfirmation,
+      });
+      if (!budgetCheck.ok) {
+        outcome = {
+          ok: false,
+          code: budgetCheck.code ?? "BUDGET_EXCEEDED",
+          message: budgetCheck.message || "Budget exceeded",
+        };
+        return outcome;
+      }
+
       if (policyResult.requiresConfirmation) {
+        recordConfirmation();
         const confirmed = await this.awaitLocalConfirmation(
           tool,
           resolvedArgs,
@@ -189,7 +218,22 @@ export class ToolExecutor {
         return outcome;
       }
 
-      const timeout = this.resolveTimeout(tool, resolvedArgs);
+      // Inject vault secrets into env for terminal tools (vault wins over user env).
+      let execArgs = resolvedArgs;
+      if (tool === "execute_command" || tool === "execute_command_stream") {
+        const injected = applySecretInjection(
+          resolvedArgs,
+          this.policy.allow_secret_injection,
+        );
+        execArgs = injected.args;
+        if (injected.injected.length > 0) {
+          this.logger.info(
+            `Injected ${injected.injected.length} secret(s) into '${tool}' env`,
+          );
+        }
+      }
+
+      const timeout = this.resolveTimeout(tool, execArgs);
       const controller = new AbortController();
       this.activeExecutions.set(id, controller);
 
@@ -208,11 +252,15 @@ export class ToolExecutor {
         const runTool = () => {
           if (tool === "execute_command_stream" && options?.onProgress) {
             return execute_command_stream(
-              resolvedArgs as { command: string; workdir?: string },
+              execArgs as {
+                command: string;
+                workdir?: string;
+                env?: Record<string, string>;
+              },
               options.onProgress,
             );
           }
-          return this.toolRegistry.execute(tool, resolvedArgs);
+          return this.toolRegistry.execute(tool, execArgs);
         };
 
         const result = (await this.runWithAbort(
@@ -220,7 +268,23 @@ export class ToolExecutor {
           controller.signal,
         )) as ToolResultPayload;
 
-        outcome = { ok: true, result };
+        let finalResult = result;
+        if (tool === "get_environment" && !result.isError) {
+          finalResult = appendBudgetSummary(result, this.policy);
+        }
+
+        outcome = { ok: true, result: finalResult };
+
+        // Record usage after successful execution.
+        recordToolCall();
+        if (tool === "execute_command" || tool === "execute_command_stream") {
+          recordShellSeconds((Date.now() - started) / 1000);
+        }
+        if (tool === "write_file" || tool === "edit_file") {
+          const bytes = estimateBytesWritten(tool, resolvedArgs);
+          if (bytes > 0) recordBytesWritten(bytes);
+        }
+
         return outcome;
       } catch (err) {
         if ((err as Error).name === "AbortError") {
@@ -243,12 +307,26 @@ export class ToolExecutor {
         this.activeExecutions.delete(id);
       }
     } finally {
+      // Audit uses original resolved args (with use_secrets names) — never secret values.
+      const auditArgs =
+        tool === "execute_command" || tool === "execute_command_stream"
+          ? {
+              ...resolvedArgs,
+              // Ensure env in audit does not contain vault values if somehow present
+              ...(resolvedArgs.env
+                ? { env: redactEnvForAuditHint(resolvedArgs.env, requestedSecrets) }
+                : {}),
+            }
+          : resolvedArgs;
+
       appendAuditLog(
         {
           ts: new Date().toISOString(),
           id,
           tool,
-          args_summary: summarizeArgsForAudit(resolvedArgs),
+          args_summary: summarizeArgsForAudit(auditArgs, {
+            secretNames: requestedSecrets,
+          }),
           outcome: outcome.ok ? "ok" : "error",
           code: outcome.ok ? undefined : outcome.code,
           duration_ms: Date.now() - started,
@@ -418,6 +496,60 @@ function checkFileReadSize(
   }
 
   return { ok: true };
+}
+
+function estimateBytesWritten(
+  tool: string,
+  args: Record<string, unknown>,
+): number {
+  if (tool === "write_file" && typeof args.content === "string") {
+    return Buffer.byteLength(args.content, "utf-8");
+  }
+  if (tool === "edit_file" && typeof args.new_string === "string") {
+    return Buffer.byteLength(args.new_string, "utf-8");
+  }
+  return 0;
+}
+
+function appendBudgetSummary(
+  result: ToolResultPayload,
+  policy: Policy,
+): ToolResultPayload {
+  const status = getBudgetStatus(policy);
+  const content = [...(result.content ?? [])];
+  const first = content[0];
+  if (first?.type === "text" && typeof first.text === "string") {
+    try {
+      const parsed = JSON.parse(first.text) as Record<string, unknown>;
+      parsed.budgets = status;
+      content[0] = { ...first, text: JSON.stringify(parsed, null, 2) };
+      return { ...result, content };
+    } catch {
+      content.push({
+        type: "text",
+        text: `\nBudgets: ${JSON.stringify(status)}`,
+      });
+      return { ...result, content };
+    }
+  }
+  content.push({
+    type: "text",
+    text: JSON.stringify({ budgets: status }, null, 2),
+  });
+  return { ...result, content };
+}
+
+/** Never put vault values into audit — redact known secret keys in env snapshot. */
+function redactEnvForAuditHint(
+  env: unknown,
+  secretNames: string[],
+): Record<string, unknown> {
+  if (env === null || typeof env !== "object" || Array.isArray(env)) {
+    return {};
+  }
+  return summarizeArgsForAudit(env as Record<string, unknown>, {
+    secretNames,
+  });
 }
 
 function expandHome(inputPath: string): string {

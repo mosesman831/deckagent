@@ -173,6 +173,7 @@ export async function execute_command_stream(
   try {
     const result = await runShellCommand(parsed.command, {
       workdir,
+      env: parsed.env,
       onChunk,
     });
 

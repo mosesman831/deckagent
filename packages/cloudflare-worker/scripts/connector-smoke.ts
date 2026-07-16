@@ -426,6 +426,78 @@ async function runProfile(
     }
   }
 
+  // 8. Optional SSE path for execute_command_stream (one profile only).
+  if (client.name === "mcpplayground") {
+    const step = "tools/call execute_command_stream SSE";
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+          Accept: "text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: id++,
+          method: "tools/call",
+          params: {
+            name: "execute_command_stream",
+            arguments: { command: "echo sse-ok" },
+          },
+        }),
+      });
+
+      const ct = res.headers.get("content-type") ?? "";
+      const text = await res.text();
+
+      // Daemon offline → skip (soft pass).
+      let offline = res.status === 503;
+      if (!offline) {
+        try {
+          const parsed = JSON.parse(text) as {
+            error?: { data?: { code?: string }; message?: string };
+          };
+          if (parsed?.error?.data?.code === "DEVICE_OFFLINE") {
+            offline = true;
+          }
+        } catch {
+          /* SSE body is not JSON — fine */
+        }
+      }
+
+      if (offline) {
+        results.push({
+          step,
+          ok: true,
+          detail: "skipped — daemon offline",
+        });
+      } else {
+        const hasEventStream = ct.includes("event-stream");
+        const hasSseOk = text.includes("sse-ok");
+        const hasEvent =
+          text.includes("event: progress") ||
+          text.includes("event: result") ||
+          text.includes("event: error") ||
+          hasSseOk;
+        const ok = hasEventStream && hasEvent && hasSseOk;
+        results.push({
+          step,
+          ok,
+          detail: ok
+            ? "SSE stream ok"
+            : `ct=${ct.slice(0, 40)} status=${res.status} body=${text.slice(0, 160)}`,
+        });
+      }
+    } catch (err) {
+      results.push({
+        step,
+        ok: false,
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   return results;
 }
 

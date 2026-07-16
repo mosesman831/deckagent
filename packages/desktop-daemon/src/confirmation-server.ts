@@ -181,14 +181,24 @@ export class ConfirmationServer {
 
   /** Test helper: approve without HTTP. */
   approveForTest(id: string): boolean {
+    return this.approve(id);
+  }
+
+  /** Test helper: deny without HTTP. */
+  denyForTest(id: string): boolean {
+    return this.deny(id);
+  }
+
+  /** Approve a pending request (control UI / tests). */
+  approve(id: string): boolean {
     const approval = this.pending.get(id);
     if (!approval || approval.decision) return false;
     this.settle(approval, "approved");
     return true;
   }
 
-  /** Test helper: deny without HTTP. */
-  denyForTest(id: string): boolean {
+  /** Deny a pending request (control UI / tests). */
+  deny(id: string): boolean {
     const approval = this.pending.get(id);
     if (!approval || approval.decision) return false;
     this.settle(approval, "denied");
@@ -197,6 +207,44 @@ export class ConfirmationServer {
 
   getPending(id: string): PendingApproval | undefined {
     return this.pending.get(id);
+  }
+
+  /** Pending approvals awaiting a decision (for control UI). */
+  listPending(): Array<{
+    id: string;
+    tool: string;
+    argsSummary: string;
+    reason: string;
+    createdAt: number;
+    expiresAt: number;
+  }> {
+    const now = Date.now();
+    const out: Array<{
+      id: string;
+      tool: string;
+      argsSummary: string;
+      reason: string;
+      createdAt: number;
+      expiresAt: number;
+    }> = [];
+    for (const approval of this.pending.values()) {
+      if (approval.decision) continue;
+      if (now > approval.expiresAt) continue;
+      out.push({
+        id: approval.id,
+        tool: approval.tool,
+        argsSummary: approval.argsSummary,
+        reason: approval.reason,
+        createdAt: approval.createdAt,
+        expiresAt: approval.expiresAt,
+      });
+    }
+    return out.sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  /** Count of undecided, non-expired approvals. */
+  pendingCount(): number {
+    return this.listPending().length;
   }
 
   private settle(approval: PendingApproval, decision: ApprovalDecision): void {

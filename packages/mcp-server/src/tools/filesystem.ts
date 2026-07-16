@@ -24,6 +24,7 @@ import {
   type ToolResponse,
 } from "../schemas.js";
 import { resolveToolPath } from "../workspace-context.js";
+import { createSnapshotBeforeMutation } from "./snapshots.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -117,6 +118,7 @@ export async function write_file(args: WriteFileArgs): Promise<ToolResponse> {
   const filePath = resolveToolPath(parsed.path);
 
   try {
+    await createSnapshotBeforeMutation({ tool: "write_file", path: filePath });
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     const tmpPath = `${filePath}.tmp.${Date.now()}`;
     await fs.writeFile(tmpPath, parsed.content, "utf-8");
@@ -158,6 +160,8 @@ export async function edit_file(args: EditFileArgs): Promise<ToolResponse> {
         isError: true,
       };
     }
+
+    await createSnapshotBeforeMutation({ tool: "edit_file", path: filePath });
 
     const newContent = parsed.replace_all
       ? content.split(parsed.old_string).join(parsed.new_string)
@@ -310,6 +314,7 @@ export async function move_file(args: MoveFileArgs): Promise<ToolResponse> {
   const destination = resolveToolPath(parsed.destination);
 
   try {
+    await createSnapshotBeforeMutation({ tool: "move_file", path: source });
     await fs.mkdir(path.dirname(destination), { recursive: true });
     await fs.rename(source, destination);
     return {

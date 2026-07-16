@@ -29,7 +29,8 @@ export const DEFAULT_REQUIRE_CONFIRMATION = [
   'write_file',
   'edit_file',
   'move_file',
-  'kill_process'
+  'kill_process',
+  'restore_snapshot'
 ] as const;
 
 export const DEFAULT_BLOCKED_COMMANDS = [
@@ -42,6 +43,30 @@ export const DEFAULT_BLOCKED_COMMANDS = [
   'dd',
   'mkfs'
 ] as const;
+
+/** Wave 3 F6 — rate limits & budgets (defaults from WAVE3_FEATURE_SPEC). */
+export const DEFAULT_BUDGETS = {
+  max_tool_calls_per_hour: 300,
+  max_shell_seconds_per_hour: 600,
+  max_bytes_written_per_hour: 50_000_000,
+  max_confirmations_per_hour: 60
+} as const;
+
+export const BudgetsSchema = z.object({
+  max_tool_calls_per_hour: z.number().int().default(DEFAULT_BUDGETS.max_tool_calls_per_hour),
+  max_shell_seconds_per_hour: z
+    .number()
+    .int()
+    .default(DEFAULT_BUDGETS.max_shell_seconds_per_hour),
+  max_bytes_written_per_hour: z
+    .number()
+    .int()
+    .default(DEFAULT_BUDGETS.max_bytes_written_per_hour),
+  max_confirmations_per_hour: z
+    .number()
+    .int()
+    .default(DEFAULT_BUDGETS.max_confirmations_per_hour)
+});
 
 export const PolicySchema = z.object({
   version: z.number().int().default(1),
@@ -56,7 +81,11 @@ export const PolicySchema = z.object({
   command_mode: z.enum(['blocklist', 'allowlist']).default('blocklist'),
   allowed_commands: z.array(z.string()).default([]),
   max_file_read_size: z.number().int().default(10 * 1024 * 1024),
-  max_command_timeout: z.number().int().default(300)
+  max_command_timeout: z.number().int().default(300),
+  // Wave 3 F4 — vault injection into execute_command env
+  allow_secret_injection: z.boolean().default(true),
+  // Wave 3 F6
+  budgets: BudgetsSchema.default({ ...DEFAULT_BUDGETS })
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -140,6 +169,8 @@ export function generateDefaultPolicy(overrides: Partial<Policy> = {}): Policy {
     allowed_commands: [],
     max_file_read_size: 10 * 1024 * 1024,
     max_command_timeout: 300,
+    allow_secret_injection: true,
+    budgets: { ...DEFAULT_BUDGETS },
     ...overrides
   };
 }

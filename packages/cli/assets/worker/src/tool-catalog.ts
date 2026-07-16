@@ -1,6 +1,6 @@
 /**
  * Single source of truth for the MCP tool catalog exposed by the Worker.
- * Must stay in sync with @deckagent/mcp-server tools (18 tools).
+ * Must stay in sync with @deckagent/mcp-server tools (20 tools).
  */
 
 export interface McpToolDefinition {
@@ -136,6 +136,12 @@ export const TOOL_CATALOG: McpToolDefinition[] = [
         workdir: { type: "string" },
         timeout: { type: "number", default: 60, maximum: 300 },
         env: { type: "object", additionalProperties: { type: "string" } },
+        use_secrets: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional vault secret names to inject into the child env (explicit; none by default)",
+        },
       },
       required: ["command"],
     },
@@ -148,6 +154,12 @@ export const TOOL_CATALOG: McpToolDefinition[] = [
       properties: {
         command: { type: "string" },
         workdir: { type: "string" },
+        use_secrets: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional vault secret names to inject into the child env (explicit; none by default)",
+        },
       },
       required: ["command"],
     },
@@ -215,6 +227,38 @@ export const TOOL_CATALOG: McpToolDefinition[] = [
     name: "get_environment",
     description: "Get system environment information.",
     inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "list_snapshots",
+    description:
+      "List recent file snapshots (pre-edit backups) for undo. Optionally filter by path.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Optional absolute path to filter snapshots",
+        },
+        limit: {
+          type: "number",
+          description: "Maximum snapshots to return",
+          default: 20,
+          maximum: 100,
+        },
+      },
+    },
+  },
+  {
+    name: "restore_snapshot",
+    description:
+      "Restore a file from a snapshot by id. Mutating — may require confirmation.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Snapshot id from list_snapshots" },
+      },
+      required: ["id"],
+    },
   },
 ];
 

@@ -53,11 +53,16 @@ export const ExecuteCommandArgsSchema = z.object({
   workdir: z.string().optional(),
   timeout: z.number().int().min(1).max(300).optional().default(60),
   env: z.record(z.string()).optional(),
+  /** Secret names for the daemon to inject into env before spawn; handlers ignore this field. */
+  use_secrets: z.array(z.string()).optional(),
 });
 
 export const ExecuteCommandStreamArgsSchema = z.object({
   command: z.string(),
   workdir: z.string().optional(),
+  env: z.record(z.string()).optional(),
+  /** Secret names for the daemon to inject into env before spawn; handlers ignore this field. */
+  use_secrets: z.array(z.string()).optional(),
 });
 
 export const ListProcessesArgsSchema = z.object({
@@ -88,6 +93,15 @@ export const BrowserEvaluateArgsSchema = z.object({
 
 export const GetEnvironmentArgsSchema = z.object({});
 
+export const ListSnapshotsArgsSchema = z.object({
+  path: z.string().optional(),
+  limit: z.number().int().min(1).max(100).optional().default(20),
+});
+
+export const RestoreSnapshotArgsSchema = z.object({
+  id: z.string().uuid(),
+});
+
 export type ReadFileArgs = z.infer<typeof ReadFileArgsSchema>;
 export type WriteFileArgs = z.infer<typeof WriteFileArgsSchema>;
 export type EditFileArgs = z.infer<typeof EditFileArgsSchema>;
@@ -106,6 +120,8 @@ export type BrowserScreenshotArgs = z.infer<typeof BrowserScreenshotArgsSchema>;
 export type BrowserClickArgs = z.infer<typeof BrowserClickArgsSchema>;
 export type BrowserEvaluateArgs = z.infer<typeof BrowserEvaluateArgsSchema>;
 export type GetEnvironmentArgs = z.infer<typeof GetEnvironmentArgsSchema>;
+export type ListSnapshotsArgs = z.infer<typeof ListSnapshotsArgsSchema>;
+export type RestoreSnapshotArgs = z.infer<typeof RestoreSnapshotArgsSchema>;
 
 export type ToolContent =
   | { type: "text"; text: string }

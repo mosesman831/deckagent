@@ -42,13 +42,24 @@ export const PolicySchema = z.object({
     "write_file",
     "edit_file",
     "kill_process",
+    "restore_snapshot",
   ]),
   read_only: z.boolean().default(false),
   allow_browser: z.boolean().default(false),
   allow_terminal: z.boolean().default(true),
   allow_computer_use: z.boolean().default(false),
+  /** When true, execute_command may inject vault secrets via use_secrets. */
+  allow_secret_injection: z.boolean().default(true),
   max_file_read_size: z.number().int().positive().default(10 * 1024 * 1024),
   max_command_timeout: z.number().int().positive().default(300),
+  budgets: z
+    .object({
+      max_tool_calls_per_hour: z.number().int().positive().default(300),
+      max_shell_seconds_per_hour: z.number().int().positive().default(600),
+      max_bytes_written_per_hour: z.number().int().positive().default(50_000_000),
+      max_confirmations_per_hour: z.number().int().positive().default(60),
+    })
+    .default({}),
 });
 
 export type Policy = z.infer<typeof PolicySchema>;
@@ -77,6 +88,7 @@ const MUTATING_TOOLS = new Set([
   "kill_process",
   "execute_command",
   "execute_command_stream",
+  "restore_snapshot",
 ]);
 
 const TERMINAL_TOOLS = new Set([
@@ -405,6 +417,8 @@ export function checkToolAllowed(
     "browser_click",
     "browser_evaluate",
     "get_environment",
+    "list_snapshots",
+    "restore_snapshot",
   ]);
 
   if (!allTools.has(toolName)) {

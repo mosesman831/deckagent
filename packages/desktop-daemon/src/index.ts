@@ -16,6 +16,8 @@ import { TunnelClient } from "./tunnel-client.js";
 import { ConfirmationServer } from "./confirmation-server.js";
 import { LocalTunnelServer } from "./local-server.js";
 import { ToolExecutor } from "./tool-executor.js";
+import { ControlUiServer } from "./control-ui.js";
+import { DAEMON_VERSION, PROTOCOL_VERSION } from "./version.js";
 
 const DECK_DIR = join(homedir(), ".deckagent");
 const PID_FILE = join(DECK_DIR, "daemon.pid");
@@ -211,6 +213,36 @@ async function main(): Promise<void> {
   const localServer = new LocalTunnelServer(executor, logger);
   const client = new TunnelClient(config, executor, logger);
 
+  const controlUi = new ControlUiServer({
+    logger,
+    confirmationServer,
+    getStatus: () => {
+      const state = client.getState();
+      const ws = executor.getWorkspace();
+      return {
+        worker_url: config.worker_url,
+        workspace: ws
+          ? { root: ws.root, name: ws.name }
+          : null,
+        daemon_version: DAEMON_VERSION,
+        protocol_version: PROTOCOL_VERSION,
+        online: state === "connected",
+        connection_state: state,
+        pending_approvals: confirmationServer.pendingCount(),
+      };
+    },
+    getPolicy: () => executor.getPolicy(),
+    setPolicy: (next) => {
+      const applied = applyRuntimePolicy(next, enableBrowserFlag);
+      executor.updatePolicy(applied);
+      try {
+        setBrowserEnabled(applied.allow_browser);
+      } catch {
+        // ignore
+      }
+    },
+  });
+
   let shuttingDown = false;
 
   async function shutdown(signal: string): Promise<void> {
@@ -221,6 +253,11 @@ async function main(): Promise<void> {
     executor.abortAll();
     try {
       await killAllActiveCommands();
+    } catch {
+      // ignore
+    }
+    try {
+      await controlUi.stop();
     } catch {
       // ignore
     }
@@ -274,11 +311,23 @@ async function main(): Promise<void> {
   }
 
   try {
+    await controlUi.start();
+  } catch (err) {
+    logger.error(
+      `Failed to start control UI: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    await confirmationServer.stop();
+    removePid();
+    process.exit(1);
+  }
+
+  try {
     await localServer.start();
   } catch (err) {
     logger.error(
       `Failed to start local tunnel server: ${err instanceof Error ? err.message : String(err)}`,
     );
+    await controlUi.stop();
     await confirmationServer.stop();
     removePid();
     process.exit(1);
@@ -289,6 +338,7 @@ async function main(): Promise<void> {
   }
 
   logger.info("Daemon started");
+  logger.info(`Control UI: ${controlUi.baseUrl}`);
 }
 
 function writeCrashLog(err: Error): void {

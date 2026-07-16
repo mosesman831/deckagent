@@ -60,9 +60,15 @@ npx deckagent daemon --foreground
 
 - **Self-hosted** — your Worker, your Cloudflare account, your data
 - **No relay** — direct WebSocket tunnel via Cloudflare Durable Objects
-- **18 tools** across filesystem, terminal, browser, and environment
-- **Policy engine** — allow/block directories, block dangerous commands, read-only mode, confirmation gates
-- **Zero configuration** — `deckagent setup` handles everything
+- **20 tools** across filesystem, terminal, browser, environment, and snapshots
+- **Workspaces** — project-scoped relative paths (`deckagent workspace use`)
+- **MCP resources** — policy, audit, workspace, devices via `resources/read`
+- **Snapshots / undo** — automatic backups before edits; `restore_snapshot`
+- **Secrets vault** — inject tokens into commands without model-visible values
+- **Budgets** — hourly caps on tool calls, shell time, and bytes written
+- **Local control UI** — `http://127.0.0.1:9150` (`deckagent ui`)
+- **SSE streaming** — `execute_command_stream` with `Accept: text/event-stream`
+- **Policy engine** — allow/block directories, allowlist/blocklist commands, read-only, confirmation
 - **Cross-platform** — macOS & Linux (LaunchAgent/systemd); Windows via scheduled task at logon
 
 ## How It Works

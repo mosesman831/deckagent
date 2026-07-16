@@ -13,6 +13,7 @@ import {
 import { verifyApiToken } from "./src/auth.js";
 import { TOOL_CATALOG, TOOL_NAMES } from "./src/tool-catalog.js";
 import { tools as mcpHandlerTools } from "./src/mcp-handler.js";
+import { formatSseEvent } from "./src/tunnel-do.js";
 import {
   RESOURCE_CATALOG,
   isKnownResourceUri,
@@ -98,6 +99,9 @@ class FakeKV {
 }
 
 class FakeDurableObjectNamespace {
+  /** Last Accept header seen on a stub.fetch (for SSE forwarding tests). */
+  lastAccept: string | null = null;
+
   idFromName(name: string): { name: string } {
     return { name };
   }
@@ -105,8 +109,37 @@ class FakeDurableObjectNamespace {
     fetch: (request: Request) => Promise<Response>;
   } {
     return {
-      fetch: async () =>
-        new Response(
+      fetch: async (request: Request) => {
+        this.lastAccept = request.headers.get("Accept");
+        let body: { method?: string; params?: { name?: string } } = {};
+        try {
+          body = (await request.clone().json()) as typeof body;
+        } catch {
+          /* ignore */
+        }
+
+        // Light SSE mock: execute_command_stream + Accept event-stream.
+        const accept = request.headers.get("Accept") ?? "";
+        if (
+          body.method === "tools/call" &&
+          body.params?.name === "execute_command_stream" &&
+          accept.includes("text/event-stream")
+        ) {
+          const sse =
+            `event: progress\ndata: ${JSON.stringify({ chunk: "sse-ok\n" })}\n\n` +
+            `event: result\ndata: ${JSON.stringify({
+              content: [{ type: "text", text: "sse-ok\n" }],
+            })}\n\n`;
+          return new Response(sse, {
+            status: 200,
+            headers: {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+            },
+          });
+        }
+
+        return new Response(
           JSON.stringify({
             jsonrpc: "2.0",
             id: null,
@@ -117,19 +150,22 @@ class FakeDurableObjectNamespace {
             },
           }),
           { status: 503, headers: { "Content-Type": "application/json" } }
-        ),
+        );
+      },
     };
   }
 }
 
-function makeEnv(): Env & { _kv: FakeKV } {
+function makeEnv(): Env & { _kv: FakeKV; _do: FakeDurableObjectNamespace } {
   const kv = new FakeKV();
+  const tunnelDo = new FakeDurableObjectNamespace();
   return {
     DECK_KV: kv as unknown as KVNamespace,
     APP_NAME: "DeckAgent",
     API_TOKEN,
-    TUNNEL_DO: new FakeDurableObjectNamespace() as unknown as DurableObjectNamespace,
+    TUNNEL_DO: tunnelDo as unknown as DurableObjectNamespace,
     _kv: kv,
+    _do: tunnelDo,
   };
 }
 
@@ -235,10 +271,43 @@ async function main() {
 
   // --- 4. Tool catalog ---
   console.log("\n4. Tool catalog (single source)");
-  assert(TOOL_CATALOG.length === 18, `18 tools (got ${TOOL_CATALOG.length})`);
+  assert(TOOL_CATALOG.length === 20, `20 tools (got ${TOOL_CATALOG.length})`);
   assert(TOOL_NAMES.has("execute_command_stream"), "has execute_command_stream");
   assert(TOOL_NAMES.has("read_file"), "has read_file");
   assert(TOOL_NAMES.has("get_environment"), "has get_environment");
+  assert(TOOL_NAMES.has("list_snapshots"), "has list_snapshots");
+  assert(TOOL_NAMES.has("restore_snapshot"), "has restore_snapshot");
+  const execCmd = TOOL_CATALOG.find((t) => t.name === "execute_command");
+  const execStream = TOOL_CATALOG.find((t) => t.name === "execute_command_stream");
+  const execProps = (execCmd?.inputSchema as { properties?: Record<string, unknown> })
+    ?.properties;
+  const streamProps = (
+    execStream?.inputSchema as { properties?: Record<string, unknown> }
+  )?.properties;
+  assert(
+    execProps?.use_secrets !== undefined,
+    "execute_command inputSchema has use_secrets"
+  );
+  assert(
+    streamProps?.use_secrets !== undefined,
+    "execute_command_stream inputSchema has use_secrets"
+  );
+  const listSnap = TOOL_CATALOG.find((t) => t.name === "list_snapshots");
+  const restoreSnap = TOOL_CATALOG.find((t) => t.name === "restore_snapshot");
+  const listSnapProps = (
+    listSnap?.inputSchema as { properties?: Record<string, unknown> }
+  )?.properties;
+  const restoreRequired = (
+    restoreSnap?.inputSchema as { required?: string[] }
+  )?.required;
+  assert(
+    listSnapProps?.path !== undefined && listSnapProps?.limit !== undefined,
+    "list_snapshots has path? and limit?"
+  );
+  assert(
+    restoreRequired?.includes("id") === true,
+    "restore_snapshot requires id"
+  );
   assert(
     mcpHandlerTools === TOOL_CATALOG ||
       (mcpHandlerTools.length === TOOL_CATALOG.length &&
@@ -271,8 +340,8 @@ async function main() {
   assert(toolsBody.jsonrpc === "2.0", "jsonrpc 2.0");
   assert(
     Array.isArray(toolsBody.result?.tools) &&
-      toolsBody.result!.tools!.length === 18,
-    "tools/list returns 18 tools"
+      toolsBody.result!.tools!.length === 20,
+    "tools/list returns 20 tools"
   );
 
   // --- 5b. MCP prompts + instructions ---
@@ -648,6 +717,96 @@ async function main() {
       authOkShape.warning === "upgrade_daemon",
     "auth_ok shape includes session_id, worker_version, min_protocol_version, server_time, warning"
   );
+
+  // --- 11. SSE format helper + Accept forwarding for execute_command_stream ---
+  console.log("\n11. SSE streaming (format + Accept forward mock)");
+  const sseProgress = formatSseEvent("progress", { chunk: "hello" });
+  assert(
+    sseProgress === 'event: progress\ndata: {"chunk":"hello"}\n\n',
+    "formatSseEvent progress shape"
+  );
+  const sseResult = formatSseEvent("result", {
+    content: [{ type: "text", text: "done" }],
+  });
+  assert(
+    sseResult.startsWith("event: result\ndata: ") && sseResult.endsWith("\n\n"),
+    "formatSseEvent result shape"
+  );
+  const sseError = formatSseEvent("error", {
+    code: "TOOL_TIMEOUT",
+    message: "timed out",
+  });
+  assert(
+    sseError.includes('"code":"TOOL_TIMEOUT"'),
+    "formatSseEvent error shape"
+  );
+
+  await updateDeviceStatus(env, deviceId, "online");
+  // Ensure only one online device so routing is unambiguous.
+  await updateDeviceStatus(env, "dev-2", "offline");
+  env._do.lastAccept = null;
+  const sseCallRes = await worker.fetch(
+    new Request(url("/mcp"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${API_TOKEN}`,
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 100,
+        method: "tools/call",
+        params: {
+          name: "execute_command_stream",
+          arguments: { command: "echo sse-ok" },
+        },
+      }),
+    }),
+    env
+  );
+  const sseCt = sseCallRes.headers.get("content-type") ?? "";
+  assert(
+    sseCt.includes("event-stream"),
+    `SSE tools/call Content-Type event-stream (got ${sseCt})`
+  );
+  assert(
+    env._do.lastAccept?.includes("text/event-stream") === true,
+    "mcp-handler forwards Accept: text/event-stream to DO"
+  );
+  const sseBody = await sseCallRes.text();
+  assert(
+    sseBody.includes("sse-ok") &&
+      (sseBody.includes("event: progress") || sseBody.includes("event: result")),
+    "SSE body contains sse-ok and at least one event"
+  );
+
+  // Without Accept event-stream, Fake DO returns DEVICE_OFFLINE JSON (buffered path).
+  const jsonCallRes = await worker.fetch(
+    new Request(url("/mcp"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${API_TOKEN}`,
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 101,
+        method: "tools/call",
+        params: {
+          name: "execute_command_stream",
+          arguments: { command: "echo sse-ok" },
+        },
+      }),
+    }),
+    env
+  );
+  assert(
+    (jsonCallRes.headers.get("content-type") ?? "").includes("application/json"),
+    "non-SSE Accept keeps JSON Content-Type"
+  );
+  assert(jsonCallRes.status === 503, "non-SSE path hits Fake DO offline JSON");
 
   console.log(`\n=== Results: ${passed} passed, ${failed} failed ===`);
   if (failed > 0) process.exit(1);

@@ -52,6 +52,30 @@ interface PendingTool {
   timer: ReturnType<typeof setTimeout>;
   /** Accumulated tool_progress chunks (e.g. execute_command_stream). */
   chunks: string[];
+  /**
+   * When set (SSE Accept path), progress/result/error are written as SSE
+   * events instead of buffering into a final JSON-RPC response.
+   */
+  sseEnqueue?: (bytes: Uint8Array) => void;
+  sseClose?: () => void;
+}
+
+const SSE_ENCODER = new TextEncoder();
+
+/** Format a single Server-Sent Event (exported for unit tests). */
+export function formatSseEvent(event: string, data: unknown): string {
+  const payload =
+    typeof data === "string" ? data : JSON.stringify(data);
+  return `event: ${event}\ndata: ${payload}\n\n`;
+}
+
+function wantsCommandStreamSse(
+  request: Request,
+  toolName: string
+): boolean {
+  if (toolName !== "execute_command_stream") return false;
+  const accept = request.headers.get("Accept") ?? "";
+  return accept.includes("text/event-stream");
 }
 
 type ResourceResultPayload = {
@@ -211,7 +235,15 @@ export class TunnelDO implements DurableObject {
       case "tool_progress": {
         const pending = this.pendingTools.get(msg.id);
         if (pending && typeof msg.chunk === "string") {
-          pending.chunks.push(msg.chunk);
+          if (pending.sseEnqueue) {
+            pending.sseEnqueue(
+              SSE_ENCODER.encode(
+                formatSseEvent("progress", { chunk: msg.chunk })
+              )
+            );
+          } else {
+            pending.chunks.push(msg.chunk);
+          }
         }
         break;
       }
@@ -296,6 +328,22 @@ export class TunnelDO implements DurableObject {
     const pending = this.pendingTools.get(id);
     if (!pending) return;
     clearTimeout(pending.timer);
+
+    // SSE streaming path: write final event and close the stream.
+    if (pending.sseEnqueue && pending.sseClose) {
+      if (value.type === "tool_result") {
+        pending.sseEnqueue(
+          SSE_ENCODER.encode(formatSseEvent("result", value.result ?? {}))
+        );
+      } else {
+        pending.sseEnqueue(
+          SSE_ENCODER.encode(formatSseEvent("error", value.error))
+        );
+      }
+      pending.sseClose();
+      this.pendingTools.delete(id);
+      return;
+    }
 
     if (value.type === "tool_result" && pending.chunks.length > 0) {
       pending.resolve({
@@ -583,6 +631,77 @@ export class TunnelDO implements DurableObject {
         args: toolArgs,
       };
 
+      // F7: SSE streaming for execute_command_stream when client Accepts event-stream.
+      if (wantsCommandStreamSse(request, toolName)) {
+        const { readable, writable } = new TransformStream<Uint8Array>();
+        const writer = writable.getWriter();
+
+        const writeSse = (bytes: Uint8Array): void => {
+          writer.write(bytes).catch(() => {});
+        };
+        const closeSse = (): void => {
+          writer.close().catch(() => {});
+        };
+
+        const timer = setTimeout(() => {
+          this.pendingTools.delete(requestId);
+          writeSse(
+            SSE_ENCODER.encode(
+              formatSseEvent("error", {
+                code: "TOOL_TIMEOUT",
+                message: "Tool execution timed out",
+              })
+            )
+          );
+          closeSse();
+        }, TOOL_TIMEOUT_MS);
+
+        this.pendingTools.set(requestId, {
+          resolve: () => {
+            /* unused — SSE uses sseEnqueue/sseClose via resolveToolResult */
+          },
+          reject: () => {
+            writeSse(
+              SSE_ENCODER.encode(
+                formatSseEvent("error", {
+                  code: "DEVICE_OFFLINE",
+                  message: "Daemon disconnected while executing tool",
+                })
+              )
+            );
+            closeSse();
+          },
+          timer,
+          chunks: [],
+          sseEnqueue: writeSse,
+          sseClose: closeSse,
+        });
+
+        try {
+          this.ws!.send(JSON.stringify(executeMsg) + "\n");
+        } catch {
+          this.pendingTools.delete(requestId);
+          clearTimeout(timer);
+          writeSse(
+            SSE_ENCODER.encode(
+              formatSseEvent("error", {
+                code: "DEVICE_OFFLINE",
+                message: "Failed to send tool request to daemon",
+              })
+            )
+          );
+          closeSse();
+        }
+
+        return new Response(readable, {
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+          },
+        });
+      }
+
+      // Default JSON-RPC path (buffer progress into final result).
       return new Promise<Response>((resolve) => {
         const timer = setTimeout(() => {
           this.pendingTools.delete(requestId);

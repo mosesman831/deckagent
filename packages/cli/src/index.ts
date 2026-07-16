@@ -18,6 +18,8 @@ import { askYesNo, getConfigDir } from './configure.js';
 import { runDoctor } from './doctor.js';
 import { runTunnel } from './tunnel.js';
 import { runWorkspaceCommand } from './workspace.js';
+import { runSecretCommand } from './secrets.js';
+import { openControlUi } from './ui.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -44,6 +46,10 @@ Usage:
   deckagent workspace use <path>  Set active workspace (project scope)
   deckagent workspace status   Show current workspace
   deckagent workspace clear    Clear workspace from config
+  deckagent secret set <NAME>  Store a secret (prompt or stdin)
+  deckagent secret list        List secret names
+  deckagent secret delete <NAME>  Delete a secret
+  deckagent ui                 Open local control UI (http://127.0.0.1:9150)
   deckagent doctor             Check DeckAgent health and prerequisites
   deckagent uninstall          Stop daemon and remove config
   deckagent version            Print version
@@ -142,6 +148,16 @@ async function main(): Promise<void> {
 
     case 'workspace': {
       runWorkspaceCommand(args.slice(1));
+      break;
+    }
+
+    case 'secret': {
+      await runSecretCommand(args.slice(1));
+      break;
+    }
+
+    case 'ui': {
+      openControlUi();
       break;
     }
 

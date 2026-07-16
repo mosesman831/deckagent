@@ -63,7 +63,7 @@ You are operating on their real hardware under their \`~/.deckagent/policy.json\
 - \`TOOL_TIMEOUT\` — shorten the command or raise timeout when allowed
 
 ## Available tool categories
-Filesystem, terminal (execute_command, stream, processes), browser (optional), get_environment.
+Filesystem (including list_snapshots / restore_snapshot for undo), terminal (execute_command, execute_command_stream with optional use_secrets, processes), browser (optional), get_environment. For long-running shell output, prefer execute_command_stream (SSE when the client Accepts text/event-stream).
 
 Act like a pair programmer with hands on their machine — careful, concrete, and policy-aware.`;
 

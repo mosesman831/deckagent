@@ -4,14 +4,20 @@ import {
   closeBrowser,
   setWorkspaceContext,
   getWorkspaceContext,
+  setSnapshotsDir,
+  setSnapshotRetention,
+  resetSnapshotRetention,
+  createSnapshotBeforeMutation,
 } from "./src/index.js";
 import type { ToolResponse } from "./src/schemas.js";
+import { ExecuteCommandArgsSchema } from "./src/schemas.js";
 import fs from "fs/promises";
 import path from "path";
 import os from "os";
 import { spawn } from "child_process";
 
 const TEST_ROOT = path.join(os.tmpdir(), `deckagent-mcp-test-${Date.now()}`);
+const SNAPSHOTS_ROOT = path.join(TEST_ROOT, "snapshots");
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(`ASSERT: ${message}`);
@@ -48,12 +54,16 @@ async function main() {
     "browser_click",
     "browser_evaluate",
     "get_environment",
+    "list_snapshots",
+    "restore_snapshot",
   ];
   for (const name of expected) {
     assert(names.includes(name), `missing tool ${name}`);
   }
 
   await fs.mkdir(TEST_ROOT, { recursive: true });
+  await fs.mkdir(SNAPSHOTS_ROOT, { recursive: true });
+  setSnapshotsDir(SNAPSHOTS_ROOT);
 
   // get_environment
   {
@@ -156,6 +166,74 @@ async function main() {
     });
     assert(!res.isError, `edit_file failed: ${textOf(res)}`);
     console.log("✓ edit_file");
+  }
+
+  // F3 snapshots: list after edit, restore previous content
+  {
+    const listRes = await registry.execute("list_snapshots", { path: fileA, limit: 10 });
+    assert(!listRes.isError, `list_snapshots failed: ${textOf(listRes)}`);
+    const listJson = JSON.parse(textOf(listRes)) as {
+      snapshots: Array<{ id: string; tool: string; path: string; ts: string }>;
+      count: number;
+    };
+    assert(listJson.count >= 1, "list_snapshots should find at least one entry after edit");
+    assert(
+      listJson.snapshots.some((s) => s.tool === "edit_file" && s.path === fileA),
+      "list_snapshots should include edit_file entry for fileA",
+    );
+
+    const snapId = listJson.snapshots.find((s) => s.tool === "edit_file")!.id;
+    const restoreRes = await registry.execute("restore_snapshot", { id: snapId });
+    assert(!restoreRes.isError, `restore_snapshot failed: ${textOf(restoreRes)}`);
+
+    const restored = await fs.readFile(fileA, "utf-8");
+    assert(restored.includes("second line"), "restore_snapshot should bring back pre-edit content");
+    assert(!restored.includes("modified line"), "restore_snapshot should not keep edited content");
+
+    // Re-apply edit so later tests see consistent content
+    const reEdit = await registry.execute("edit_file", {
+      path: fileA,
+      old_string: "second line",
+      new_string: "modified line",
+    });
+    assert(!reEdit.isError, `re-edit after restore failed: ${textOf(reEdit)}`);
+    console.log("✓ list_snapshots + restore_snapshot");
+  }
+
+  // F3 snapshot rotation (cap)
+  {
+    setSnapshotRetention({ maxSnapshots: 3 });
+    const rotFile = path.join(TEST_ROOT, "rotate.txt");
+    await fs.writeFile(rotFile, "v0\n", "utf-8");
+    for (let i = 1; i <= 5; i++) {
+      await createSnapshotBeforeMutation({ tool: "write_file", path: rotFile });
+      await fs.writeFile(rotFile, `v${i}\n`, "utf-8");
+    }
+    const listRes = await registry.execute("list_snapshots", { path: rotFile, limit: 20 });
+    assert(!listRes.isError, `list_snapshots (rotation) failed: ${textOf(listRes)}`);
+    const listJson = JSON.parse(textOf(listRes)) as { count: number };
+    assert(listJson.count <= 3, `rotation should keep <= 3 snapshots, got ${listJson.count}`);
+    resetSnapshotRetention();
+    console.log("✓ snapshot rotation");
+  }
+
+  // F4 use_secrets accepted by schema (handlers ignore; daemon injects)
+  {
+    const parsed = ExecuteCommandArgsSchema.parse({
+      command: "echo ok",
+      use_secrets: ["GITHUB_TOKEN"],
+    });
+    assert(
+      Array.isArray(parsed.use_secrets) && parsed.use_secrets[0] === "GITHUB_TOKEN",
+      "use_secrets should pass schema validation",
+    );
+    const res = await registry.execute("execute_command", {
+      command: "echo secrets-ok",
+      use_secrets: ["GITHUB_TOKEN"],
+    });
+    assert(!res.isError, `execute_command with use_secrets failed: ${textOf(res)}`);
+    assert(textOf(res).includes("secrets-ok"), "execute_command should still run with use_secrets");
+    console.log("✓ use_secrets schema");
   }
 
   // get_file_info

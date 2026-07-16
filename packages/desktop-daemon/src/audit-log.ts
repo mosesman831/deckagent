@@ -26,9 +26,12 @@ export interface AuditEntry {
 const DEFAULT_MAX_BYTES = 50 * 1024 * 1024;
 const MAX_STRING_LEN = 200;
 
-/** Keys that look like secrets — never logged (value replaced with [redacted]). */
+/**
+ * Keys that look like secrets — never logged (value replaced with [redacted]).
+ * Matches common TOKEN / SECRET / PASSWORD / KEY patterns (not only exact names).
+ */
 const SECRET_KEY_PATTERN =
-  /^(token|password|secret|api[_-]?key|auth|authorization|bearer|credential|private[_-]?key|access[_-]?token|refresh[_-]?token)$/i;
+  /(token|password|secret|api[_-]?key|auth|authorization|bearer|credential|private[_-]?key|^key$|_key$)/i;
 
 /** Content-heavy fields — omit full body, keep length hint only. */
 const CONTENT_KEYS = new Set([
@@ -46,17 +49,26 @@ export function getAuditLogPath(logDir?: string): string {
   return join(dir, "audit.jsonl");
 }
 
+export interface SummarizeArgsOptions {
+  /** Extra key names to redact (e.g. vault secret names from use_secrets). */
+  secretNames?: string[];
+}
+
 /**
  * Build a redacted args summary suitable for audit logs.
  * Truncates long strings, omits full file contents, redacts secrets.
  */
 export function summarizeArgsForAudit(
   args: Record<string, unknown>,
+  options?: SummarizeArgsOptions,
 ): Record<string, unknown> {
+  const secretNames = new Set(
+    (options?.secretNames ?? []).map((n) => n.toLowerCase()),
+  );
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(args)) {
     if (key.startsWith("_") || key.startsWith("__")) continue;
-    if (SECRET_KEY_PATTERN.test(key)) {
+    if (shouldRedactKey(key, secretNames)) {
       out[key] = "[redacted]";
       continue;
     }
@@ -69,12 +81,42 @@ export function summarizeArgsForAudit(
             : value;
       continue;
     }
-    out[key] = summarizeValue(value);
+    if (key === "env" && value !== null && typeof value === "object") {
+      out[key] = redactEnvObject(value as Record<string, unknown>, secretNames);
+      continue;
+    }
+    out[key] = summarizeValue(value, secretNames);
   }
   return out;
 }
 
-function summarizeValue(value: unknown): unknown {
+function shouldRedactKey(key: string, secretNames: Set<string>): boolean {
+  if (SECRET_KEY_PATTERN.test(key)) return true;
+  if (secretNames.has(key.toLowerCase())) return true;
+  return false;
+}
+
+function redactEnvObject(
+  env: Record<string, unknown>,
+  secretNames: Set<string>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (shouldRedactKey(k, secretNames)) {
+      out[k] = "[redacted]";
+    } else if (typeof v === "string" && v.length > MAX_STRING_LEN) {
+      out[k] = v.slice(0, MAX_STRING_LEN) + "…";
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+function summarizeValue(
+  value: unknown,
+  secretNames: Set<string> = new Set(),
+): unknown {
   if (typeof value === "string") {
     if (value.length > MAX_STRING_LEN) {
       return value.slice(0, MAX_STRING_LEN) + "…";
@@ -82,7 +124,7 @@ function summarizeValue(value: unknown): unknown {
     return value;
   }
   if (Array.isArray(value)) {
-    return value.slice(0, 20).map((v) => summarizeValue(v));
+    return value.slice(0, 20).map((v) => summarizeValue(v, secretNames));
   }
   if (value !== null && typeof value === "object") {
     const obj = value as Record<string, unknown>;
@@ -93,10 +135,10 @@ function summarizeValue(value: unknown): unknown {
         nested["…"] = "truncated";
         break;
       }
-      if (SECRET_KEY_PATTERN.test(k)) {
+      if (shouldRedactKey(k, secretNames)) {
         nested[k] = "[redacted]";
       } else {
-        nested[k] = summarizeValue(v);
+        nested[k] = summarizeValue(v, secretNames);
       }
     }
     return nested;

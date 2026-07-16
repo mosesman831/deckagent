@@ -19,6 +19,8 @@ import {
   BrowserClickArgsSchema,
   BrowserEvaluateArgsSchema,
   GetEnvironmentArgsSchema,
+  ListSnapshotsArgsSchema,
+  RestoreSnapshotArgsSchema,
 } from "./schemas.js";
 import {
   read_file,
@@ -49,6 +51,15 @@ import {
   setBrowserEnabled,
 } from "./tools/browser.js";
 import { get_environment } from "./tools/environment.js";
+import {
+  list_snapshots,
+  restore_snapshot,
+  createSnapshotBeforeMutation,
+  setSnapshotsDir,
+  getSnapshotsDir,
+  setSnapshotRetention,
+  resetSnapshotRetention,
+} from "./tools/snapshots.js";
 
 export interface ToolDefinition<T = unknown> {
   name: string;
@@ -227,6 +238,20 @@ export function createRegistry(): ToolRegistry {
       inputSchema: GetEnvironmentArgsSchema,
       handler: get_environment,
     }),
+    defineTool({
+      name: "list_snapshots",
+      description:
+        "List recent file snapshots taken before mutating edits (write/edit/move). Optionally filter by path.",
+      inputSchema: ListSnapshotsArgsSchema,
+      handler: list_snapshots,
+    }),
+    defineTool({
+      name: "restore_snapshot",
+      description:
+        "Restore a file from a previous snapshot by id. Creates a new snapshot of the current file first if it exists.",
+      inputSchema: RestoreSnapshotArgsSchema,
+      handler: restore_snapshot,
+    }),
   ]);
 
   return registry;
@@ -261,6 +286,15 @@ export {
   setBrowserEnabled,
 };
 export { get_environment };
+export {
+  list_snapshots,
+  restore_snapshot,
+  createSnapshotBeforeMutation,
+  setSnapshotsDir,
+  getSnapshotsDir,
+  setSnapshotRetention,
+  resetSnapshotRetention,
+};
 export {
   setWorkspaceContext,
   getWorkspaceContext,
