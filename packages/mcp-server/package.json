@@ -1,0 +1,51 @@
+{
+  "name": "@deckagent/mcp-server",
+  "version": "0.2.0",
+  "description": "Shared MCP tool library for DeckAgent",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "default": "./dist/src/index.js"
+    },
+    "./schemas": {
+      "types": "./dist/src/schemas.d.ts",
+      "default": "./dist/src/schemas.js"
+    },
+    "./tools/filesystem": {
+      "types": "./dist/src/tools/filesystem.d.ts",
+      "default": "./dist/src/tools/filesystem.js"
+    },
+    "./tools/terminal": {
+      "types": "./dist/src/tools/terminal.d.ts",
+      "default": "./dist/src/tools/terminal.js"
+    },
+    "./tools/browser": {
+      "types": "./dist/src/tools/browser.d.ts",
+      "default": "./dist/src/tools/browser.js"
+    },
+    "./tools/environment": {
+      "types": "./dist/src/tools/environment.d.ts",
+      "default": "./dist/src/tools/environment.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "npx tsx test.ts"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@types/node": "^20.17.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

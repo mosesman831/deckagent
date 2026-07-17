@@ -1,0 +1,30 @@
+{
+  "name": "@deckagent/desktop-daemon",
+  "version": "0.1.0",
+  "description": "Desktop daemon that connects to the DeckAgent Cloudflare Worker via WebSocket tunnel and executes local MCP tools",
+  "type": "module",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "bin": {
+    "deckagent-daemon": "dist/src/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/src/index.js",
+    "test": "npm run build && node dist/test.js",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@deckagent/mcp-server": "file:../mcp-server",
+    "@types/ws": "^8.18.1",
+    "ws": "^8.21.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.10",
+    "typescript": "^5.7.2"
+  }
+}

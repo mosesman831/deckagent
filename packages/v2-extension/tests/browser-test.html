@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>DeckAgent v2 Extension Integration Test</title>
+</head>
+<body>
+  <h1>DeckAgent v2 Extension Test Page</h1>
+  <p>This page simulates AI chat API requests for interception testing.</p>
+  <script>
+    window.__deckagent_test_results = {
+      injected: false,
+      messages: [],
+      fetches: []
+    };
+
+    window.addEventListener("message", (event) => {
+      if (event.data && event.data.source === "deckagent-v2-content-script") {
+        window.__deckagent_test_results.messages.push(event.data.message);
+      }
+    });
+
+    async function runSimulation() {
+      const endpoints = [
+        ["deepseek", "https://chat.deepseek.com/api/v0/chat/completions"],
+        ["qwen", "https://chat.qwenlm.ai/api/v1/chat/completions"],
+        ["kimi", "https://kimi.com/v1/chat/completions"],
+        ["zai", "https://api.z.ai/v1/chat/completions"]
+      ];
+
+      for (const [name, url] of endpoints) {
+        try {
+          const response = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: "test-model",
+              messages: [{ role: "user", content: `Hello from ${name}` }]
+            })
+          });
+          window.__deckagent_test_results.fetches.push({
+            adapter: name,
+            url,
+            status: response.status,
+            ok: response.ok
+          });
+        } catch (err) {
+          window.__deckagent_test_results.fetches.push({
+            adapter: name,
+            url,
+            error: String(err)
+          });
+        }
+      }
+
+      window.__deckagent_test_results.injected = typeof window.__deckagent_injected !== "undefined";
+      window.__deckagent_test_results.complete = true;
+    }
+
+    // Delay slightly so content script has time to inject and patch fetch.
+    setTimeout(runSimulation, 500);
+  </script>
+</body>
+</html>

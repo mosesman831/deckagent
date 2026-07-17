@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+.env
+.env.local
+reference/
+*.mp4
+*.png
+!packages/v2-extension/public/icon/*.png
+!packages/v2-extension/src/public/icon/*.png
+.wrangler/
+.dev.vars
+SPEC.md
+DEVIN_PROMPT.md

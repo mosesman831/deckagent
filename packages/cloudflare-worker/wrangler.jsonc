@@ -1,0 +1,26 @@
+{
+  // KV namespace id is filled by `deckagent setup` / CLI (empty string placeholder).
+  // CLI replaces: "id": ""  with the real namespace id before deploy.
+  // For local `wrangler dev --local`, preview_id is used by Miniflare.
+  "name": "deckagent",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "kv_namespaces": [
+    { "binding": "DECK_KV", "id": "", "preview_id": "00000000000000000000000000000001" }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "TUNNEL_DO", "class_name": "TunnelDO" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["TunnelDO"]
+    }
+  ],
+  "vars": {
+    "APP_NAME": "DeckAgent"
+  }
+}

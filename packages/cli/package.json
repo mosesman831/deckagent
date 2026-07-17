@@ -1,0 +1,33 @@
+{
+  "name": "@deckagent/cli",
+  "version": "0.1.0",
+  "description": "One-command setup wizard for DeckAgent",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "deckagent": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "assets"
+  ],
+  "scripts": {
+    "bundle:assets": "node ../../scripts/bundle-cli-assets.mjs",
+    "build": "tsc",
+    "prepack": "npm run bundle:assets && npm run build",
+    "test": "npm run build && node test/write-worker-config.test.mjs && node test/resolve-paths.test.mjs && node test/workspace.test.mjs && node test/secrets.test.mjs",
+    "prepublishOnly": "npm run prepack"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@deckagent/desktop-daemon": "file:../desktop-daemon",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.10",
+    "typescript": "^5.7.2"
+  }
+}
