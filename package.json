@@ -1,0 +1,13 @@
+{
+  "name": "deckagent",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=packages/mcp-server && npm run build --workspace=packages/cloudflare-worker && npm run build --workspace=packages/desktop-daemon && npm run build --workspace=packages/cli",
+    "test": "npm run test --workspace=packages/mcp-server",
+    "clean": "npm run clean --workspaces --if-present",
+    "ci": "npm run build && npm test"
+  }
+}
