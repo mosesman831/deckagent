@@ -36,17 +36,41 @@ trap cleanup EXIT
 # Give the server a moment to start
 sleep 1
 
-# Determine Chrome/Chromium binary
-CHROME_BIN="${CHROME_BIN:-/usr/bin/chromium-browser}"
-if [[ ! -x "$CHROME_BIN" ]]; then
-  echo "Chrome binary not found at $CHROME_BIN; set CHROME_BIN" >&2
+# Branded Google Chrome ignores --load-extension. Prefer Chrome for Testing
+# (downloaded by Puppeteer) or Chromium, where unpacked extensions load.
+resolve_chrome() {
+  if [[ -n "${CHROME_BIN:-}" && -x "${CHROME_BIN}" ]]; then
+    echo "${CHROME_BIN}"
+    return
+  fi
+  local cache="${PUPPETEER_CACHE_DIR:-$HOME/.cache/puppeteer}"
+  local found=""
+  if [[ -d "$cache/chrome" ]]; then
+    found="$(find "$cache/chrome" -type f -path '*/chrome-linux64/chrome' 2>/dev/null | sort | tail -1 || true)"
+  fi
+  if [[ -n "$found" && -x "$found" ]]; then
+    echo "$found"
+    return
+  fi
+  local candidate
+  for candidate in chromium chromium-browser google-chrome-stable google-chrome; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      command -v "$candidate"
+      return
+    fi
+  done
+  echo "No Chrome binary found. Set CHROME_BIN to Chrome for Testing or Chromium." >&2
   exit 1
-fi
+}
+
+CHROME_BIN="$(resolve_chrome)"
+echo "Using Chrome: $CHROME_BIN"
 
 # Create a fresh user data dir
 USER_DATA_DIR="$(mktemp -d)"
 
-# Launch Chromium with the unpacked extension
+# Launch Chromium with the unpacked extension.
+# --headless=new loads extensions on Chromium / Chrome for Testing.
 echo "[3/6] Launching headless Chromium with extension..."
 "$CHROME_BIN" \
   --headless=new \
@@ -57,6 +81,7 @@ echo "[3/6] Launching headless Chromium with extension..."
   --disable-background-timer-throttling \
   --disable-renderer-backgrounding \
   --disable-features=Translate,PrivacySandboxSettings4 \
+  --disable-extensions-except="$BUILD_DIR" \
   --load-extension="$BUILD_DIR" \
   --remote-debugging-port=9222 \
   --user-data-dir="$USER_DATA_DIR" \
