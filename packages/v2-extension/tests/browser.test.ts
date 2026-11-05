@@ -49,6 +49,62 @@ async function getServiceWorkerConsoleLogs(client: CDP.Client): Promise<string[]
   return logs;
 }
 
+const CHAT_HOSTS = ["deepseek.com", "qwenlm.ai", "kimi.com", "z.ai", "chatglm.cn"];
+
+function isChatApi(url: string): boolean {
+  return CHAT_HOSTS.some((host) => url.includes(host));
+}
+
+/**
+ * The test page calls real chat origins so the extension's host matchers run.
+ * Those origins do not allow CORS from localhost, so fulfill them locally.
+ */
+async function stubChatApis(client: CDP.Client): Promise<void> {
+  const { Fetch } = client;
+  await Fetch.enable({ patterns: [{ urlPattern: "*" }] });
+  client.Fetch.requestPaused(async (params: { requestId: string; request: { url: string; method: string } }) => {
+    const { requestId, request } = params;
+    try {
+      if (!isChatApi(request.url)) {
+        await Fetch.continueRequest({ requestId });
+        return;
+      }
+
+      const cors = [
+        { name: "Access-Control-Allow-Origin", value: "*" },
+        { name: "Access-Control-Allow-Methods", value: "POST, GET, OPTIONS" },
+        { name: "Access-Control-Allow-Headers", value: "*" }
+      ];
+
+      if (request.method === "OPTIONS") {
+        await Fetch.fulfillRequest({
+          requestId,
+          responseCode: 204,
+          responseHeaders: cors
+        });
+        return;
+      }
+
+      const body = Buffer.from(
+        JSON.stringify({ choices: [{ message: { role: "assistant", content: "ok" } }] })
+      ).toString("base64");
+      await Fetch.fulfillRequest({
+        requestId,
+        responseCode: 200,
+        responseHeaders: [{ name: "Content-Type", value: "application/json" }, ...cors],
+        body
+      });
+    } catch (err) {
+      console.error("Failed to fulfill", request.url, err);
+      try {
+        await Fetch.continueRequest({ requestId });
+      } catch {
+        // Request may already be gone.
+      }
+    }
+  });
+}
+
 async function main(): Promise<void> {
   const client = await CDP({ port: 9222 });
   const { Page, Runtime } = client;
@@ -56,6 +112,7 @@ async function main(): Promise<void> {
   try {
     await Page.enable();
     await Runtime.enable();
+    await stubChatApis(client);
 
     const swLogsPromise = getServiceWorkerConsoleLogs(client);
 
@@ -91,7 +148,7 @@ async function main(): Promise<void> {
 
     // Gather console messages from the page.
     const { result: consoleResult } = await Runtime.evaluate({
-      expression: "window.__deckagent_test_results.messages.map(m => m.type + ':' + (m.payload as any)?.adapterType).join('\\n')",
+      expression: "window.__deckagent_test_results.messages.map(m => m.type + ':' + (m.payload && m.payload.adapterType)).join('\\n')",
       returnByValue: true,
       awaitPromise: false
     });
